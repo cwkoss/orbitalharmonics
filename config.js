@@ -187,6 +187,12 @@ const CONFIG = {
   GLOW_ENABLED: false,
   GLOW_RADIUS_PX: 16,   // native px
   GLOW_ALPHA: 0.3,
+
+  // Trail fling — trails fly off as straight vectors instead of following the arc
+  TRAIL_FLING: false,
+
+  // Period-proportional trail length — longer trails for longer-period balls
+  PERIOD_TRAIL: false,
 };
 
 const SCALES = {

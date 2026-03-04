@@ -18,7 +18,7 @@ let state = {
 
 // p5.dom UI elements
 let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
-let btnAltDir, btnSonar, btnGlow, btnFlash;
+let btnAltDir, btnSonar, btnGlow, btnFlash, btnFling, btnPeriodTrail, inpTrailLen;
 let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
 let inpCenterNote, lblLoNote, lblHiNote;
 
@@ -34,7 +34,7 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 function noteToMidi(noteName) {
   // e.g. "C3" → 48, "C#3" → 49; Hz number → float MIDI
   if (typeof noteName === 'number') return 12 * Math.log2(noteName / 440) + 69;
-  const match = noteName.match(/^([A-G]#?)(\d+)$/);
+  const match = noteName.match(/^([A-G]#?)(-?\d+)$/);
   if (!match) return 60;
   const pitch = NOTE_NAMES.indexOf(match[1]);
   const octave = parseInt(match[2]);
@@ -312,6 +312,18 @@ function buildUI() {
 
   btnGlow = createButton('Off'); styleBtn(btnGlow); btnGlow.mousePressed(onGlowToggle);
   addToggleRow('Glow', btnGlow, visBody);
+
+  btnFling = createButton('Off'); styleBtn(btnFling); btnFling.mousePressed(onFlingToggle);
+  addToggleRow('Fling', btnFling, visBody);
+
+  inpTrailLen = createElement('input'); inpTrailLen.attribute('type', 'number');
+  inpTrailLen.attribute('min', '1'); inpTrailLen.attribute('max', '1000');
+  inpTrailLen.value(CONFIG.TRAIL_LENGTH); styleNumberInput(inpTrailLen);
+  inpTrailLen.input(onTrailLenChange);
+  addLabeledFull('Trail Len', inpTrailLen, visBody);
+
+  btnPeriodTrail = createButton('Off'); styleBtn(btnPeriodTrail); btnPeriodTrail.mousePressed(onPeriodTrailToggle);
+  addToggleRow('Period Trail', btnPeriodTrail, visBody);
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -472,6 +484,7 @@ function updateBalls() {
   for (const ball of balls) {
     ball.prevTheta = ball.theta;
     ball.theta = ((ball.theta + ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+    if (CONFIG.TRAIL_FLING) advanceTrails(ball);
     checkTrigger(ball);
     pushTrail(ball);
   }
@@ -501,15 +514,30 @@ function checkTrigger(ball) {
   }
 }
 
+function ballTrailMax(ball) {
+  if (!CONFIG.PERIOD_TRAIL || balls.length === 0) return CONFIG.TRAIL_LENGTH;
+  return Math.max(1, Math.round(CONFIG.TRAIL_LENGTH * ball.period / balls[0].period));
+}
+
 function pushTrail(ball) {
-  const S = CONFIG.PREVIEW_SCALE;
   const CX = CONFIG.NATIVE_W / 2;
   const CY = CONFIG.NATIVE_H / 2;
   const x = CX + ball.radius * Math.sin(ball.theta);
   const y = CY - ball.radius * Math.cos(ball.theta);
-  ball.trailPos.unshift({ x, y }); // newest first
-  if (ball.trailPos.length > CONFIG.TRAIL_LENGTH) {
+  // Tangential velocity in native px/frame — used when TRAIL_FLING is enabled
+  const dTheta = ball.omega / CONFIG.FPS;
+  const vx = ball.radius * Math.cos(ball.theta) * dTheta;
+  const vy = ball.radius * Math.sin(ball.theta) * dTheta;
+  ball.trailPos.unshift({ x, y, vx, vy }); // newest first
+  if (ball.trailPos.length > ballTrailMax(ball)) {
     ball.trailPos.pop();
+  }
+}
+
+function advanceTrails(ball) {
+  for (const pt of ball.trailPos) {
+    pt.x += pt.vx;
+    pt.y += pt.vy;
   }
 }
 
@@ -547,13 +575,14 @@ function drawBalls(S) {
 
     // Draw trail oldest→newest (index 0 = newest, last index = oldest)
     noStroke();
+    const trailMax = ballTrailMax(ball);
     for (let n = trailPos.length - 1; n >= 0; n--) {
       const age = n; // 0 = newest (bright), length-1 = oldest (faded)
       const alpha = Math.pow(CONFIG.TRAIL_DECAY, age) * 0.8;
       fill(hue, 80, 65, alpha);
       const px = trailPos[n].x * S;
       const py = trailPos[n].y * S;
-      const d = (CONFIG.BALL_SIZE_PX * S) * (0.4 + 0.6 * (1 - age / CONFIG.TRAIL_LENGTH));
+      const d = (CONFIG.BALL_SIZE_PX * S) * (0.4 + 0.6 * (1 - age / trailMax));
       circle(px, py, d);
     }
 
@@ -768,6 +797,23 @@ function onSonarToggle() {
 function onGlowToggle() {
   CONFIG.GLOW_ENABLED = !CONFIG.GLOW_ENABLED;
   setToggleActive(btnGlow, CONFIG.GLOW_ENABLED);
+}
+
+function onFlingToggle() {
+  CONFIG.TRAIL_FLING = !CONFIG.TRAIL_FLING;
+  setToggleActive(btnFling, CONFIG.TRAIL_FLING);
+  // Clear trails so old gravity-following points don't persist into fling mode
+  for (const ball of balls) ball.trailPos = [];
+}
+
+function onTrailLenChange() {
+  const v = parseInt(inpTrailLen.value());
+  if (v >= 1 && v <= 1000) CONFIG.TRAIL_LENGTH = v;
+}
+
+function onPeriodTrailToggle() {
+  CONFIG.PERIOD_TRAIL = !CONFIG.PERIOD_TRAIL;
+  setToggleActive(btnPeriodTrail, CONFIG.PERIOD_TRAIL);
 }
 
 // ─── Recording ────────────────────────────────────────────────────────────────
