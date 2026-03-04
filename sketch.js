@@ -3,7 +3,7 @@
 // ─── Globals ─────────────────────────────────────────────────────────────────
 
 let balls = [];
-let poly, comp, lim, audioRecorder;
+let poly, comp, lim, audioRecorder, spaceReverb;
 let currentSynthNodes = [];
 let videoRecorder, videoChunks = [];
 
@@ -19,6 +19,9 @@ let state = {
 // p5.dom UI elements
 let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
 let btnAltDir, btnSonar, btnGlow, btnFlash, btnFling, btnPeriodTrail, inpTrailLen;
+let selColorMode, btnConstellation, inpConstellationThresh;
+let btnGravity, inpGravityX, inpGravityY, inpGravityStrength;
+let inpSpace;
 let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
 let inpCenterNote, lblLoNote, lblHiNote;
 
@@ -116,7 +119,11 @@ function initAudio() {
   audioRecorder = new Tone.Recorder();
   lim.connect(audioRecorder);
 
-  // Synth chain (poly + per-preset effects) → comp
+  // Persistent space reverb — sits between preset output and comp
+  spaceReverb = new Tone.Reverb({ decay: CONFIG.SPACE_REVERB_DECAY, wet: CONFIG.SPACE_WET });
+  spaceReverb.connect(comp);
+
+  // Synth chain (poly + per-preset effects) → spaceReverb → comp
   applySynthPreset(CONFIG.SYNTH_PRESET);
 }
 
@@ -128,7 +135,7 @@ function applySynthPreset(key) {
   const built = SYNTH_PRESETS[key].build();
   poly             = built.poly;
   currentSynthNodes = built.nodes;
-  built.output.connect(comp);
+  built.output.connect(spaceReverb);
 }
 
 // ─── Period computation ───────────────────────────────────────────────────────
@@ -282,6 +289,12 @@ function buildUI() {
   selSynth.selected(CONFIG.SYNTH_PRESET); selSynth.changed(onSynthChange);
   addLabeledFull('Sound', selSynth, audioBody);
 
+  inpSpace = createElement('input'); inpSpace.attribute('type', 'range');
+  inpSpace.attribute('min', '0'); inpSpace.attribute('max', '1'); inpSpace.attribute('step', '0.01');
+  inpSpace.value(CONFIG.SPACE_WET); inpSpace.style('width', '100%'); inpSpace.style('cursor', 'pointer');
+  inpSpace.input(onSpaceChange);
+  addLabeledFull('Space', inpSpace, audioBody);
+
   inpCenterNote = createElement('input'); inpCenterNote.attribute('type', 'text');
   inpCenterNote.attribute('placeholder', 'e.g. C4'); inpCenterNote.value(CONFIG.CENTER_NOTE);
   styleTextInput(inpCenterNote); inpCenterNote.input(onCenterNoteChange);
@@ -304,6 +317,14 @@ function buildUI() {
   // ── VISUAL ───────────────────────────────────────────────────────────────────
   const visBody = makeSection('Visual', panel);
 
+  selColorMode = createSelect(); styleSelect(selColorMode);
+  selColorMode.option('Index',    'index');
+  selColorMode.option('Velocity', 'velocity');
+  selColorMode.option('Trigger',  'trigger');
+  selColorMode.option('Harmonic', 'harmonic');
+  selColorMode.selected(CONFIG.COLOR_MODE); selColorMode.changed(onColorModeChange);
+  addLabeledFull('Color Mode', selColorMode, visBody);
+
   btnFlash = createButton('Off'); styleBtn(btnFlash); btnFlash.mousePressed(onFlashToggle);
   addToggleRow('Flash', btnFlash, visBody);
 
@@ -324,6 +345,37 @@ function buildUI() {
 
   btnPeriodTrail = createButton('Off'); styleBtn(btnPeriodTrail); btnPeriodTrail.mousePressed(onPeriodTrailToggle);
   addToggleRow('Period Trail', btnPeriodTrail, visBody);
+
+  btnConstellation = createButton('Off'); styleBtn(btnConstellation); btnConstellation.mousePressed(onConstellationToggle);
+  addToggleRow('Constellation', btnConstellation, visBody);
+
+  inpConstellationThresh = createElement('input'); inpConstellationThresh.attribute('type', 'range');
+  inpConstellationThresh.attribute('min', '0.01'); inpConstellationThresh.attribute('max', '0.5'); inpConstellationThresh.attribute('step', '0.01');
+  inpConstellationThresh.value(CONFIG.CONSTELLATION_PHASE_THRESH);
+  inpConstellationThresh.style('width', '100%'); inpConstellationThresh.style('cursor', 'pointer');
+  inpConstellationThresh.input(() => { CONFIG.CONSTELLATION_PHASE_THRESH = parseFloat(inpConstellationThresh.value()); });
+  addLabeledFull('Phase Thresh', inpConstellationThresh, visBody);
+
+  btnGravity = createButton('Off'); styleBtn(btnGravity); btnGravity.mousePressed(onGravityToggle);
+  addToggleRow('Gravity Well', btnGravity, visBody);
+
+  inpGravityX = createElement('input'); inpGravityX.attribute('type', 'range');
+  inpGravityX.attribute('min', '0'); inpGravityX.attribute('max', '1'); inpGravityX.attribute('step', '0.01');
+  inpGravityX.value(CONFIG.GRAVITY_X); inpGravityX.style('width', '100%'); inpGravityX.style('cursor', 'pointer');
+  inpGravityX.input(() => { CONFIG.GRAVITY_X = parseFloat(inpGravityX.value()); });
+  addLabeledFull('Well X', inpGravityX, visBody);
+
+  inpGravityY = createElement('input'); inpGravityY.attribute('type', 'range');
+  inpGravityY.attribute('min', '0'); inpGravityY.attribute('max', '1'); inpGravityY.attribute('step', '0.01');
+  inpGravityY.value(CONFIG.GRAVITY_Y); inpGravityY.style('width', '100%'); inpGravityY.style('cursor', 'pointer');
+  inpGravityY.input(() => { CONFIG.GRAVITY_Y = parseFloat(inpGravityY.value()); });
+  addLabeledFull('Well Y', inpGravityY, visBody);
+
+  inpGravityStrength = createElement('input'); inpGravityStrength.attribute('type', 'range');
+  inpGravityStrength.attribute('min', '0'); inpGravityStrength.attribute('max', '1'); inpGravityStrength.attribute('step', '0.01');
+  inpGravityStrength.value(CONFIG.GRAVITY_STRENGTH); inpGravityStrength.style('width', '100%'); inpGravityStrength.style('cursor', 'pointer');
+  inpGravityStrength.input(() => { CONFIG.GRAVITY_STRENGTH = parseFloat(inpGravityStrength.value()); });
+  addLabeledFull('Well Strength', inpGravityStrength, visBody);
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -465,6 +517,8 @@ function draw() {
 
   drawTriggerLine(S);
   drawOrbits(S);
+  drawGravityWell(S);
+  drawConstellations(S);
   drawSonarRings(S);
   drawBalls(S);
   drawHUD(S);
@@ -541,6 +595,50 @@ function advanceTrails(ball) {
   }
 }
 
+// ─── Color / display helpers ─────────────────────────────────────────────────
+
+function getBallDisplayColor(ball) {
+  // Returns [hue, sat, lit] without mutating ball.hue
+  const mode = CONFIG.COLOR_MODE;
+
+  if (mode === 'velocity') {
+    const maxOmega = Math.abs(balls[0].omega);
+    const minOmega = Math.abs(balls[balls.length - 1].omega);
+    const t = (Math.abs(ball.omega) - minOmega) / (maxOmega - minOmega || 1);
+    return [240 * (1 - t), 90, 80]; // fast=red, slow=blue
+  }
+
+  if (mode === 'trigger') {
+    const age = state.simFrame - ball.lastTriggerFrame;
+    const t = Math.max(0, 1 - age / CONFIG.TRIGGER_COOL_FRAMES);
+    return [ball.hue, 60 + 30 * t, 50 + 45 * t]; // spikes bright on trigger, cools to dim
+  }
+
+  if (mode === 'harmonic') {
+    const ratio = ball.period / balls[0].period;
+    const nearInt = Math.round(ratio);
+    if (Math.abs(ratio - nearInt) < 0.05) {
+      return [(nearInt * 137.508) % 360, 85, 72]; // golden-angle hue per integer ratio
+    }
+    return [0, 0, 35]; // non-harmonic → grey
+  }
+
+  return [ball.hue, 90, 80]; // 'index' (default)
+}
+
+function gravityDisplace(nx, ny) {
+  // Returns {dx, dy} in native px to apply before scaling; pure visual, no physics
+  if (!CONFIG.GRAVITY_ENABLED) return { dx: 0, dy: 0 };
+  const gx = CONFIG.GRAVITY_X * CONFIG.NATIVE_W;
+  const gy = CONFIG.GRAVITY_Y * CONFIG.NATIVE_H;
+  const dx = gx - nx;
+  const dy = gy - ny;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const safeDist = Math.max(dist, 20);
+  const force = (CONFIG.GRAVITY_STRENGTH * 80) / (safeDist * 0.05 + 1);
+  return { dx: (dx / safeDist) * force, dy: (dy / safeDist) * force };
+}
+
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 function drawTriggerLine(S) {
@@ -560,42 +658,94 @@ function drawOrbits(S) {
   const CY = CONFIG.NATIVE_H / 2 * S;
   noFill();
   for (const ball of balls) {
-    stroke(ball.hue, 60, 50, 0.08);
+    const [h] = getBallDisplayColor(ball);
+    stroke(h, 60, 50, 0.08);
     strokeWeight(1 * S);
     circle(CX, CY, ball.radius * 2 * S);
   }
 }
 
 function drawBalls(S) {
-  const CX = CONFIG.NATIVE_W / 2 * S;
-  const CY = CONFIG.NATIVE_H / 2 * S;
+  const CX = CONFIG.NATIVE_W / 2;
+  const CY = CONFIG.NATIVE_H / 2;
 
   for (const ball of balls) {
-    const { hue, trailPos, radius, theta } = ball;
+    const { trailPos, radius, theta } = ball;
+    const [h, sat, lit] = getBallDisplayColor(ball);
 
     // Draw trail oldest→newest (index 0 = newest, last index = oldest)
     noStroke();
     const trailMax = ballTrailMax(ball);
-    // Scale decay so the trail reaches the same end-alpha regardless of length
     const decay = Math.pow(CONFIG.TRAIL_DECAY, CONFIG.TRAIL_LENGTH / trailMax);
     for (let n = trailPos.length - 1; n >= 0; n--) {
-      const age = n; // 0 = newest (bright), length-1 = oldest (faded)
+      const age = n;
       const alpha = Math.pow(decay, age) * 0.8;
-      fill(hue, 80, 65, alpha);
-      const px = trailPos[n].x * S;
-      const py = trailPos[n].y * S;
+      fill(h, sat * 0.9, lit * 0.8, alpha);
+      const { dx, dy } = gravityDisplace(trailPos[n].x, trailPos[n].y);
+      const px = (trailPos[n].x + dx) * S;
+      const py = (trailPos[n].y + dy) * S;
       const d = (CONFIG.BALL_SIZE_PX * S) * (0.4 + 0.6 * (1 - age / trailMax));
       circle(px, py, d);
     }
 
-    // Draw ball
-    const bx = CX + radius * Math.sin(theta) * S;
-    const by = CY - radius * Math.cos(theta) * S;
+    // Draw ball dot
+    const nx = CX + radius * Math.sin(theta);
+    const ny = CY - radius * Math.cos(theta);
+    const { dx, dy } = gravityDisplace(nx, ny);
+    const bx = (nx + dx) * S;
+    const by = (ny + dy) * S;
     noStroke();
-    if (CONFIG.GLOW_ENABLED) drawBallGlow(bx, by, hue, CONFIG.GLOW_RADIUS_PX * S);
-    fill(hue, 90, 80, 1.0);
+    if (CONFIG.GLOW_ENABLED) drawBallGlow(bx, by, h, CONFIG.GLOW_RADIUS_PX * S);
+    fill(h, sat, lit, 1.0);
     circle(bx, by, CONFIG.BALL_SIZE_PX * S);
   }
+}
+
+function drawConstellations(S) {
+  if (!CONFIG.CONSTELLATION_ENABLED || balls.length < 2) return;
+  const CX = CONFIG.NATIVE_W / 2;
+  const CY = CONFIG.NATIVE_H / 2;
+  const thresh = CONFIG.CONSTELLATION_PHASE_THRESH;
+  noFill();
+  for (let i = 0; i < balls.length - 1; i++) {
+    const a = balls[i];
+    const anx = CX + a.radius * Math.sin(a.theta);
+    const any = CY - a.radius * Math.cos(a.theta);
+    const { dx: adx, dy: ady } = gravityDisplace(anx, any);
+    const ax = (anx + adx) * S;
+    const ay = (any + ady) * S;
+    const [aHue] = getBallDisplayColor(a);
+    for (let j = i + 1; j < balls.length; j++) {
+      const b = balls[j];
+      let diff = Math.abs(a.theta - b.theta);
+      if (diff > Math.PI) diff = TWO_PI - diff;
+      if (diff > thresh) continue;
+      const t = 1 - diff / thresh;
+      const alpha = t * t * CONFIG.CONSTELLATION_ALPHA_MAX;
+      const [bHue] = getBallDisplayColor(b);
+      const bnx = CX + b.radius * Math.sin(b.theta);
+      const bny = CY - b.radius * Math.cos(b.theta);
+      const { dx: bdx, dy: bdy } = gravityDisplace(bnx, bny);
+      const bx = (bnx + bdx) * S;
+      const by = (bny + bdy) * S;
+      stroke((aHue + bHue) / 2, 70, 80, alpha);
+      strokeWeight(CONFIG.CONSTELLATION_LINE_WIDTH * S);
+      line(ax, ay, bx, by);
+    }
+  }
+}
+
+function drawGravityWell(S) {
+  if (!CONFIG.GRAVITY_ENABLED) return;
+  const gx = CONFIG.GRAVITY_X * CONFIG.NATIVE_W * S;
+  const gy = CONFIG.GRAVITY_Y * CONFIG.NATIVE_H * S;
+  const r = 6 * S;
+  noFill();
+  stroke(0, 0, 80, 0.25);
+  strokeWeight(1 * S);
+  circle(gx, gy, r * 2);
+  line(gx - r * 1.5, gy, gx + r * 1.5, gy);
+  line(gx, gy - r * 1.5, gx, gy + r * 1.5);
 }
 
 function drawHUD(S) {
@@ -816,6 +966,26 @@ function onTrailLenChange() {
 function onPeriodTrailToggle() {
   CONFIG.PERIOD_TRAIL = !CONFIG.PERIOD_TRAIL;
   setToggleActive(btnPeriodTrail, CONFIG.PERIOD_TRAIL);
+}
+
+function onColorModeChange() {
+  CONFIG.COLOR_MODE = selColorMode.value();
+}
+
+function onSpaceChange() {
+  const v = parseFloat(inpSpace.value());
+  CONFIG.SPACE_WET = v;
+  if (spaceReverb) spaceReverb.wet.value = v;
+}
+
+function onConstellationToggle() {
+  CONFIG.CONSTELLATION_ENABLED = !CONFIG.CONSTELLATION_ENABLED;
+  setToggleActive(btnConstellation, CONFIG.CONSTELLATION_ENABLED);
+}
+
+function onGravityToggle() {
+  CONFIG.GRAVITY_ENABLED = !CONFIG.GRAVITY_ENABLED;
+  setToggleActive(btnGravity, CONFIG.GRAVITY_ENABLED);
 }
 
 // ─── Recording ────────────────────────────────────────────────────────────────

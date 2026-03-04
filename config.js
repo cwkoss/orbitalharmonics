@@ -193,6 +193,26 @@ const CONFIG = {
 
   // Period-proportional trail length — longer trails for longer-period balls
   PERIOD_TRAIL: false,
+
+  // Space reverb — wet level of persistent reverb between preset output and compressor
+  SPACE_WET: 0.0,
+  SPACE_REVERB_DECAY: 4.0,
+
+  // Ball color mode
+  COLOR_MODE: 'index',        // 'index' | 'velocity' | 'trigger' | 'harmonic'
+  TRIGGER_COOL_FRAMES: 30,
+
+  // Constellation lines
+  CONSTELLATION_ENABLED: false,
+  CONSTELLATION_PHASE_THRESH: 0.15,
+  CONSTELLATION_ALPHA_MAX: 0.35,
+  CONSTELLATION_LINE_WIDTH: 1,
+
+  // Gravity well (visual only — does not affect physics)
+  GRAVITY_ENABLED: false,
+  GRAVITY_X: 0.6,
+  GRAVITY_Y: 0.35,
+  GRAVITY_STRENGTH: 0.15,
 };
 
 const SCALES = {
