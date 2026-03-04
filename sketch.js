@@ -576,9 +576,11 @@ function drawBalls(S) {
     // Draw trail oldest→newest (index 0 = newest, last index = oldest)
     noStroke();
     const trailMax = ballTrailMax(ball);
+    // Scale decay so the trail reaches the same end-alpha regardless of length
+    const decay = Math.pow(CONFIG.TRAIL_DECAY, CONFIG.TRAIL_LENGTH / trailMax);
     for (let n = trailPos.length - 1; n >= 0; n--) {
       const age = n; // 0 = newest (bright), length-1 = oldest (faded)
-      const alpha = Math.pow(CONFIG.TRAIL_DECAY, age) * 0.8;
+      const alpha = Math.pow(decay, age) * 0.8;
       fill(hue, 80, 65, alpha);
       const px = trailPos[n].x * S;
       const py = trailPos[n].y * S;
