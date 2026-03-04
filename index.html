@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Orbital</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      height: 100vh;
+      font-family: monospace;
+      overflow: hidden;
+    }
+    #panel {
+      width: 200px;
+      min-height: 100vh;
+      background: #080808;
+      border-right: 1px solid #1a1a1a;
+      overflow-y: auto;
+      flex-shrink: 0;
+    }
+    #canvas-container {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+    }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <div id="panel"></div>
+  <div id="canvas-container"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+  <script src="config.js"></script>
+  <script src="sketch.js"></script>
+</body>
+</html>

@@ -1,0 +1,838 @@
+// sketch.js — p5.js sketch for Orbital audiovisual composition
+
+// ─── Globals ─────────────────────────────────────────────────────────────────
+
+let balls = [];
+let poly, comp, lim, audioRecorder;
+let currentSynthNodes = [];
+let videoRecorder, videoChunks = [];
+
+let state = {
+  playing: false,
+  recording: false,
+  simFrame: 0,
+  triggerPulseFrames: 0,
+  audioReady: false,
+  recordStartTime: 0,
+};
+
+// p5.dom UI elements
+let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
+let btnAltDir, btnSonar, btnGlow, btnFlash;
+let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
+let inpCenterNote, lblLoNote, lblHiNote;
+
+let sonarRings = []; // { x, y, r, age, hue } all in native px
+
+// Derived scale constants (set in initBalls)
+const TWO_PI = Math.PI * 2;
+
+// ─── Note utilities ───────────────────────────────────────────────────────────
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function noteToMidi(noteName) {
+  // e.g. "C3" → 48, "C#3" → 49; Hz number → float MIDI
+  if (typeof noteName === 'number') return 12 * Math.log2(noteName / 440) + 69;
+  const match = noteName.match(/^([A-G]#?)(\d+)$/);
+  if (!match) return 60;
+  const pitch = NOTE_NAMES.indexOf(match[1]);
+  const octave = parseInt(match[2]);
+  return (octave + 1) * 12 + pitch;
+}
+
+function midiToNote(midi) {
+  const octave = Math.floor(midi / 12) - 1;
+  const pitch = midi % 12;
+  return NOTE_NAMES[pitch] + octave;
+}
+
+function midiToNoteOrHz(midi) {
+  // Returns a note name string for true semitones, or Hz number for microtones.
+  // Both are accepted by Tone.js triggerAttackRelease.
+  return Number.isInteger(midi) ? midiToNote(midi) : midiToHz(midi);
+}
+
+function midiToHz(midi) {
+  return 440 * Math.pow(2, (midi - 69) / 12);
+}
+
+function formatNoteLabel(midi) {
+  const hz = Math.round(midiToHz(midi));
+  if (Number.isInteger(midi)) return `${hz} Hz (${midiToNote(midi)})`;
+  return `${hz} Hz`;
+}
+
+function buildNoteListCentered(centerNote, scaleName, N) {
+  const intervals = SCALES[scaleName]; // always starts with 0 (root)
+  const centerMidi = noteToMidi(centerNote);
+
+  // All scale notes in MIDI range 0–127 treating centerNote as root (interval 0).
+  // Each octave offset adds/subtracts 12 from centerMidi; intervals fill within.
+  const pool = new Set();
+  for (let oct = -12; oct <= 12; oct++) {
+    for (const iv of intervals) {
+      const m = centerMidi + oct * 12 + iv;
+      if (m >= 0 && m <= 127) pool.add(m);
+    }
+  }
+  const sorted = Array.from(pool).sort((a, b) => a - b);
+
+  // Find the center note's position in the sorted pool.
+  // centerMidi is always present because intervals[0]=0 → oct=0 → centerMidi+0+0.
+  const ci = sorted.indexOf(centerMidi);
+
+  // Build alternating list: center, +1 step, −1 step, +2 steps, −2 steps, …
+  const result = [];
+  let up = ci;       // next to take from ≥ center (starts at center itself)
+  let down = ci - 1; // next to take from < center
+
+  for (let i = 0; i < N; i++) {
+    if (i % 2 === 0) {
+      if (up < sorted.length)      result.push(midiToNoteOrHz(sorted[up++]));
+      else if (down >= 0)          result.push(midiToNoteOrHz(sorted[down--]));
+    } else {
+      if (down >= 0)               result.push(midiToNoteOrHz(sorted[down--]));
+      else if (up < sorted.length) result.push(midiToNoteOrHz(sorted[up++]));
+    }
+  }
+  return result; // [center, +1, −1, +2, −2, …]
+}
+
+// ─── Audio initialization ─────────────────────────────────────────────────────
+
+function initAudio() {
+  // Persistent chain — survives preset changes
+  comp = new Tone.Compressor({
+    threshold: CONFIG.COMPRESSOR_THRESHOLD,
+    ratio:     CONFIG.COMPRESSOR_RATIO,
+    attack:    0.003,
+    release:   0.25,
+  });
+  lim = new Tone.Limiter(CONFIG.LIMITER_CEILING);
+  comp.connect(lim);
+  lim.toDestination();
+
+  audioRecorder = new Tone.Recorder();
+  lim.connect(audioRecorder);
+
+  // Synth chain (poly + per-preset effects) → comp
+  applySynthPreset(CONFIG.SYNTH_PRESET);
+}
+
+function applySynthPreset(key) {
+  if (poly) poly.dispose();
+  currentSynthNodes.forEach(n => n.dispose());
+
+  CONFIG.SYNTH_PRESET = key;
+  const built = SYNTH_PRESETS[key].build();
+  poly             = built.poly;
+  currentSynthNodes = built.nodes;
+  built.output.connect(comp);
+}
+
+// ─── Period computation ───────────────────────────────────────────────────────
+
+function computePeriods(mode, balls, loop) {
+  if (mode === 'harmonic') {
+    // T_i = loop/i for i=1..balls — each ball completes i full orbits per loop
+    const arr = [];
+    for (let i = 1; i <= balls; i++) arr.push(loop / i);
+    return arr.sort((a, b) => a - b);
+  }
+  if (mode === 'pendulum') {
+    // T_i = loop/(balls+i) for i=0..balls-1
+    // Slowest completes exactly `balls` orbits, fastest completes 2×balls−1.
+    // The tight frequency cluster creates spreading/collapsing wave patterns.
+    const arr = [];
+    for (let i = 0; i < balls; i++) arr.push(loop / (balls + i));
+    return arr.sort((a, b) => a - b);
+  }
+  if (mode === 'factors') {
+    // Periods = divisors of (loop×10), each divided by 10, keeping ≥ 0.5s
+    // Ball count is derived — not a free parameter in this mode.
+    const base = Math.round(loop * 10);
+    const arr = [];
+    for (let d = 1; d <= base; d++) {
+      if (base % d === 0) {
+        const period = d / 10;
+        if (period >= 0.5) arr.push(period);
+      }
+    }
+    return arr.sort((a, b) => a - b);
+  }
+  return [];
+}
+
+// ─── Ball initialization ──────────────────────────────────────────────────────
+
+function initBalls() {
+  balls = [];
+  const periods = computePeriods(CONFIG.ORBIT_MODE, CONFIG.ORBIT_BALLS, CONFIG.ORBIT_LOOP);
+  CONFIG.ORBIT_BALLS = periods.length; // sync — matters for 'factors' mode (derived N)
+  const N = periods.length;
+  const scaleName = CONFIG.SCALE;
+
+  // Build note list centered on CENTER_NOTE, alternating up/down through scale
+  const noteList = buildNoteListCentered(CONFIG.CENTER_NOTE, scaleName, N);
+
+  for (let i = 0; i < N; i++) {
+    const T = periods[i];
+    const r = CONFIG.MIN_RADIUS_PX +
+              (CONFIG.MAX_RADIUS_PX - CONFIG.MIN_RADIUS_PX) * i / (N - 1);
+    const hue = 240 * i / (N - 1);
+    // Tone direction: 'low_outside' → inner=high, outer=low (default)
+    //                'low_inside'  → inner=low, outer=high
+    const noteName = CONFIG.TONE_DIRECTION === 'low_inside'
+      ? noteList[i]
+      : noteList[N - 1 - i];
+
+    const sign = (CONFIG.ALT_DIRECTION && i % 2 === 1) ? -1 : 1;
+    balls.push({
+      index:            i,
+      period:           T,
+      radius:           r,
+      omega:            sign * TWO_PI / T,
+      theta:            0,
+      prevTheta:        0,
+      noteName:         noteName,
+      hue:              hue,
+      trailPos:         [],
+      lastTriggerFrame: -9999,
+    });
+  }
+  if (lblLoNote) syncNoteRangeUI(); // update range display after balls are built
+}
+
+// ─── p5.js setup ─────────────────────────────────────────────────────────────
+
+function setup() {
+  const S = CONFIG.PREVIEW_SCALE;
+  const cnv = createCanvas(CONFIG.NATIVE_W * S, CONFIG.NATIVE_H * S);
+  cnv.parent('canvas-container');
+  frameRate(CONFIG.FPS);
+  colorMode(HSL, 360, 100, 100, 1);
+  textFont('monospace');
+
+  initAudio();
+  initBalls();
+  buildUI();
+}
+
+// ─── UI construction ──────────────────────────────────────────────────────────
+
+function buildUI() {
+  const panel = select('#panel');
+
+  // ── CONTROLS ────────────────────────────────────────────────────────────────
+  const ctrlBody = makeSection('Controls', panel);
+
+  const ctrlBtns = makeRow(ctrlBody);
+  btnPlay = createButton('Play'); styleBtn(btnPlay); btnPlay.mousePressed(togglePlay); btnPlay.parent(ctrlBtns);
+  btnReset = createButton('Reset'); styleBtn(btnReset); btnReset.mousePressed(resetSim); btnReset.parent(ctrlBtns);
+
+  btnRecord = createButton('Record'); styleBtn(btnRecord); btnRecord.mousePressed(toggleRecord);
+  btnRecord.style('width', '100%'); btnRecord.parent(ctrlBody);
+
+  // ── ORBITS ──────────────────────────────────────────────────────────────────
+  const orbBody = makeSection('Orbits', panel);
+
+  selPreset = createSelect(); styleSelect(selPreset);
+  selPreset.option('─ Custom ─', '');
+  Object.entries(PRESETS).forEach(([k, p]) => selPreset.option(p.label, k));
+  selPreset.selected('harmonic_48');
+  selPreset.changed(onPresetChange);
+  addLabeledFull('Preset', selPreset, orbBody);
+
+  const modeWrap = createDiv(''); modeWrap.parent(orbBody); modeWrap.style('margin-bottom', '8px');
+  makePanelLabel('Mode').parent(modeWrap);
+  btnModeH = createButton('Harmonic'); styleModeBtn(btnModeH); btnModeH.parent(modeWrap); btnModeH.mousePressed(() => setOrbitMode('harmonic'));
+  btnModeP = createButton('Pendulum'); styleModeBtn(btnModeP); btnModeP.parent(modeWrap); btnModeP.mousePressed(() => setOrbitMode('pendulum'));
+  btnModeF = createButton('Factors');  styleModeBtn(btnModeF); btnModeF.parent(modeWrap); btnModeF.mousePressed(() => setOrbitMode('factors'));
+  updateModeButtons();
+
+  inpBalls = createElement('input'); inpBalls.attribute('type', 'number');
+  inpBalls.attribute('min', '1'); inpBalls.attribute('max', '500');
+  inpBalls.value(CONFIG.ORBIT_BALLS); styleNumberInput(inpBalls); inpBalls.input(onOrbitParamChange);
+  addLabeledFull('Balls', inpBalls, orbBody);
+
+  inpLoop = createElement('input'); inpLoop.attribute('type', 'number'); inpLoop.attribute('min', '1');
+  inpLoop.value(CONFIG.ORBIT_LOOP); styleNumberInput(inpLoop); inpLoop.input(onOrbitParamChange);
+  addLabeledFull('Loop (s)', inpLoop, orbBody);
+
+  btnAltDir = createButton('Off'); styleBtn(btnAltDir); btnAltDir.mousePressed(onAltDirToggle);
+  addToggleRow('Alt Dir', btnAltDir, orbBody);
+
+  // ── AUDIO ────────────────────────────────────────────────────────────────────
+  const audioBody = makeSection('Audio', panel);
+
+  selScale = createSelect(); styleSelect(selScale);
+  Object.keys(SCALES).forEach(s => selScale.option(s));
+  selScale.selected(CONFIG.SCALE); selScale.changed(onScaleChange);
+  addLabeledFull('Scale', selScale, audioBody);
+
+  selToneDir = createSelect(); styleSelect(selToneDir);
+  selToneDir.option('Low outside', 'low_outside');
+  selToneDir.option('Low inside',  'low_inside');
+  selToneDir.selected(CONFIG.TONE_DIRECTION); selToneDir.changed(onToneDirChange);
+  addLabeledFull('Direction', selToneDir, audioBody);
+
+  selSynth = createSelect(); styleSelect(selSynth);
+  Object.entries(SYNTH_PRESETS).forEach(([k, p]) => selSynth.option(p.label, k));
+  selSynth.selected(CONFIG.SYNTH_PRESET); selSynth.changed(onSynthChange);
+  addLabeledFull('Sound', selSynth, audioBody);
+
+  inpCenterNote = createElement('input'); inpCenterNote.attribute('type', 'text');
+  inpCenterNote.attribute('placeholder', 'e.g. C4'); inpCenterNote.value(CONFIG.CENTER_NOTE);
+  styleTextInput(inpCenterNote); inpCenterNote.input(onCenterNoteChange);
+  addLabeledFull('Center Note', inpCenterNote, audioBody);
+
+  // Lowest / Highest note display (side by side)
+  const rangeRow = createDiv(''); rangeRow.parent(audioBody);
+  rangeRow.style('display', 'flex'); rangeRow.style('gap', '8px'); rangeRow.style('margin-bottom', '4px');
+
+  const loWrap = createDiv(''); loWrap.parent(rangeRow); loWrap.style('flex', '1');
+  makePanelLabel('Lowest').parent(loWrap);
+  lblLoNote = createSpan('—'); lblLoNote.parent(loWrap);
+  lblLoNote.style('font-family', 'monospace'); lblLoNote.style('font-size', '12px');
+
+  const hiWrap = createDiv(''); hiWrap.parent(rangeRow); hiWrap.style('flex', '1');
+  makePanelLabel('Highest').parent(hiWrap);
+  lblHiNote = createSpan('—'); lblHiNote.parent(hiWrap);
+  lblHiNote.style('font-family', 'monospace'); lblHiNote.style('font-size', '12px');
+
+  // ── VISUAL ───────────────────────────────────────────────────────────────────
+  const visBody = makeSection('Visual', panel);
+
+  btnFlash = createButton('Off'); styleBtn(btnFlash); btnFlash.mousePressed(onFlashToggle);
+  addToggleRow('Flash', btnFlash, visBody);
+
+  btnSonar = createButton('Off'); styleBtn(btnSonar); btnSonar.mousePressed(onSonarToggle);
+  addToggleRow('Sonar', btnSonar, visBody);
+
+  btnGlow = createButton('Off'); styleBtn(btnGlow); btnGlow.mousePressed(onGlowToggle);
+  addToggleRow('Glow', btnGlow, visBody);
+}
+
+// ─── UI helpers ───────────────────────────────────────────────────────────────
+
+function makeSection(title, parentEl) {
+  const sec = createDiv('');
+  sec.parent(parentEl);
+  sec.style('padding', '12px 14px 14px');
+  sec.style('border-bottom', '1px solid #181818');
+  const hdr = createDiv(title.toUpperCase());
+  hdr.parent(sec);
+  hdr.style('color', '#3a3a3a');
+  hdr.style('font-size', '9px');
+  hdr.style('letter-spacing', '0.15em');
+  hdr.style('font-family', 'monospace');
+  hdr.style('margin-bottom', '10px');
+  const body = createDiv('');
+  body.parent(sec);
+  return body;
+}
+
+function makeRow(parent) {
+  const row = createDiv('');
+  row.parent(parent);
+  row.style('display', 'flex');
+  row.style('gap', '6px');
+  row.style('margin-bottom', '6px');
+  return row;
+}
+
+function makePanelLabel(text) {
+  const lbl = createDiv(text.toUpperCase());
+  lbl.style('color', '#555');
+  lbl.style('font-size', '10px');
+  lbl.style('letter-spacing', '0.08em');
+  lbl.style('font-family', 'monospace');
+  lbl.style('margin-bottom', '4px');
+  return lbl;
+}
+
+function addLabeledFull(labelText, el, parentDiv) {
+  const wrap = createDiv('');
+  wrap.parent(parentDiv);
+  wrap.style('margin-bottom', '8px');
+  makePanelLabel(labelText).parent(wrap);
+  el.parent(wrap);
+  el.style('width', '100%');
+  el.style('box-sizing', 'border-box');
+}
+
+function addToggleRow(labelText, btn, parentDiv) {
+  const row = createDiv('');
+  row.parent(parentDiv);
+  row.style('display', 'flex');
+  row.style('justify-content', 'space-between');
+  row.style('align-items', 'center');
+  row.style('margin-bottom', '6px');
+  const lbl = createSpan(labelText);
+  lbl.style('color', '#777');
+  lbl.style('font-size', '11px');
+  lbl.style('font-family', 'monospace');
+  lbl.parent(row);
+  btn.parent(row);
+  btn.style('min-width', '40px');
+}
+
+function styleBtn(btn) {
+  btn.style('background', '#111');
+  btn.style('color', '#fff');
+  btn.style('border', '1px solid #444');
+  btn.style('padding', '6px 12px');
+  btn.style('font-family', 'monospace');
+  btn.style('font-size', '12px');
+  btn.style('cursor', 'pointer');
+}
+
+function styleModeBtn(btn) {
+  btn.style('background', '#111');
+  btn.style('color', '#555');
+  btn.style('border', '1px solid #2a2a2a');
+  btn.style('padding', '5px 10px');
+  btn.style('font-family', 'monospace');
+  btn.style('font-size', '11px');
+  btn.style('cursor', 'pointer');
+  btn.style('width', '100%');
+  btn.style('text-align', 'left');
+  btn.style('display', 'block');
+  btn.style('margin-bottom', '3px');
+}
+
+function styleNumberInput(inp) {
+  inp.style('background', '#111');
+  inp.style('color', '#fff');
+  inp.style('border', '1px solid #444');
+  inp.style('padding', '6px 8px');
+  inp.style('font-family', 'monospace');
+  inp.style('font-size', '12px');
+}
+
+function styleTextInput(inp) {
+  inp.style('background', '#111');
+  inp.style('color', '#fff');
+  inp.style('border', '1px solid #444');
+  inp.style('padding', '6px 8px');
+  inp.style('font-family', 'monospace');
+  inp.style('font-size', '12px');
+}
+
+function styleSelect(sel) {
+  sel.style('background', '#111');
+  sel.style('color', '#fff');
+  sel.style('border', '1px solid #444');
+  sel.style('padding', '6px 8px');
+  sel.style('font-family', 'monospace');
+  sel.style('font-size', '12px');
+  sel.style('cursor', 'pointer');
+}
+
+function updateModeButtons() {
+  [[btnModeH, 'harmonic'], [btnModeP, 'pendulum'], [btnModeF, 'factors']].forEach(([btn, m]) => {
+    const active = CONFIG.ORBIT_MODE === m;
+    btn.style('color',        active ? '#fff'   : '#555');
+    btn.style('border-color', active ? '#888'   : '#2a2a2a');
+    btn.style('background',   active ? '#1c1c1c' : '#111');
+  });
+}
+
+// ─── Main draw loop ───────────────────────────────────────────────────────────
+
+function draw() {
+  const S = CONFIG.PREVIEW_SCALE;
+  background(0, 0, 5); // very dark, not pure black for trail blending
+
+  if (state.playing) {
+    updateBalls();
+    if (CONFIG.SONAR_ENABLED) updateSonarRings();
+    state.simFrame++;
+  }
+
+  drawTriggerLine(S);
+  drawOrbits(S);
+  drawSonarRings(S);
+  drawBalls(S);
+  drawHUD(S);
+
+  // Auto-stop recording after RECORD_DURATION
+  if (state.recording) {
+    const elapsed = (state.simFrame - state.recordStartTime) / CONFIG.FPS;
+    if (elapsed >= CONFIG.ORBIT_LOOP) {
+      stopRecording();
+    }
+  }
+}
+
+// ─── Physics update ───────────────────────────────────────────────────────────
+
+function updateBalls() {
+  for (const ball of balls) {
+    ball.prevTheta = ball.theta;
+    ball.theta = ((ball.theta + ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+    checkTrigger(ball);
+    pushTrail(ball);
+  }
+  if (state.triggerPulseFrames > 0) state.triggerPulseFrames--;
+}
+
+function checkTrigger(ball) {
+  const { prevTheta, theta } = ball;
+  // Direction-agnostic wraparound: any per-frame step is << π, so a jump > π means 0/2π crossing
+  const crossed = Math.abs(theta - prevTheta) > Math.PI;
+  // Debounce = 40% of period in frames; handles even the fastest ball (0.5s → 12 frames).
+  const debounceOk = (state.simFrame - ball.lastTriggerFrame) > ball.period * CONFIG.FPS * 0.4;
+
+  if (crossed && debounceOk && state.audioReady) {
+    poly.triggerAttackRelease(ball.noteName, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
+    ball.lastTriggerFrame = state.simFrame;
+    state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
+    if (CONFIG.SONAR_ENABLED) {
+      sonarRings.push({
+        x: CONFIG.NATIVE_W / 2,
+        y: CONFIG.NATIVE_H / 2 - ball.radius,
+        r: CONFIG.BALL_SIZE_PX / 2,
+        age: 0,
+        hue: ball.hue,
+      });
+    }
+  }
+}
+
+function pushTrail(ball) {
+  const S = CONFIG.PREVIEW_SCALE;
+  const CX = CONFIG.NATIVE_W / 2;
+  const CY = CONFIG.NATIVE_H / 2;
+  const x = CX + ball.radius * Math.sin(ball.theta);
+  const y = CY - ball.radius * Math.cos(ball.theta);
+  ball.trailPos.unshift({ x, y }); // newest first
+  if (ball.trailPos.length > CONFIG.TRAIL_LENGTH) {
+    ball.trailPos.pop();
+  }
+}
+
+// ─── Rendering ────────────────────────────────────────────────────────────────
+
+function drawTriggerLine(S) {
+  const CX = CONFIG.NATIVE_W / 2 * S;
+  const CY = CONFIG.NATIVE_H / 2 * S;
+  const isPulse = CONFIG.TRIGGER_FLASH && state.triggerPulseFrames > 0;
+  const alpha = isPulse ? CONFIG.TRIGGER_LINE_ALPHA_PULSE : CONFIG.TRIGGER_LINE_ALPHA_IDLE;
+  const lw    = isPulse ? CONFIG.TRIGGER_LINE_WIDTH_PULSE  : CONFIG.TRIGGER_LINE_WIDTH_IDLE;
+
+  stroke(0, 0, 100, alpha);
+  strokeWeight(lw * S);
+  line(CX, 0, CX, CY); // from top edge to center
+}
+
+function drawOrbits(S) {
+  const CX = CONFIG.NATIVE_W / 2 * S;
+  const CY = CONFIG.NATIVE_H / 2 * S;
+  noFill();
+  for (const ball of balls) {
+    stroke(ball.hue, 60, 50, 0.08);
+    strokeWeight(1 * S);
+    circle(CX, CY, ball.radius * 2 * S);
+  }
+}
+
+function drawBalls(S) {
+  const CX = CONFIG.NATIVE_W / 2 * S;
+  const CY = CONFIG.NATIVE_H / 2 * S;
+
+  for (const ball of balls) {
+    const { hue, trailPos, radius, theta } = ball;
+
+    // Draw trail oldest→newest (index 0 = newest, last index = oldest)
+    noStroke();
+    for (let n = trailPos.length - 1; n >= 0; n--) {
+      const age = n; // 0 = newest (bright), length-1 = oldest (faded)
+      const alpha = Math.pow(CONFIG.TRAIL_DECAY, age) * 0.8;
+      fill(hue, 80, 65, alpha);
+      const px = trailPos[n].x * S;
+      const py = trailPos[n].y * S;
+      const d = (CONFIG.BALL_SIZE_PX * S) * (0.4 + 0.6 * (1 - age / CONFIG.TRAIL_LENGTH));
+      circle(px, py, d);
+    }
+
+    // Draw ball
+    const bx = CX + radius * Math.sin(theta) * S;
+    const by = CY - radius * Math.cos(theta) * S;
+    noStroke();
+    if (CONFIG.GLOW_ENABLED) drawBallGlow(bx, by, hue, CONFIG.GLOW_RADIUS_PX * S);
+    fill(hue, 90, 80, 1.0);
+    circle(bx, by, CONFIG.BALL_SIZE_PX * S);
+  }
+}
+
+function drawHUD(S) {
+  const elapsed = state.simFrame / CONFIG.FPS;
+  const mins = Math.floor(elapsed / 60);
+  const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
+  const timeStr = `${mins}:${secs}`;
+
+  noStroke();
+  fill(0, 0, 80, 0.7);
+  textSize(14 * S);
+  textAlign(LEFT, TOP);
+  text(timeStr + ' / ' + CONFIG.ORBIT_LOOP + 's', 8 * S, 8 * S);
+
+  // Title
+  fill(0, 0, 100, 0.15);
+  textSize(22 * S);
+  textAlign(CENTER, CENTER);
+  text('ORBITAL', CONFIG.NATIVE_W / 2 * S, CONFIG.NATIVE_H / 2 * S);
+
+  // Recording indicator
+  if (state.recording) {
+    fill(0, 90, 60, 0.9);
+    textSize(11 * S);
+    textAlign(RIGHT, TOP);
+    text('● REC', (CONFIG.NATIVE_W - 8) * S, 8 * S);
+  }
+}
+
+function updateSonarRings() {
+  for (const ring of sonarRings) { ring.r += CONFIG.SONAR_RING_SPEED; ring.age++; }
+  for (let i = sonarRings.length - 1; i >= 0; i--) {
+    if (sonarRings[i].age >= CONFIG.SONAR_MAX_AGE) sonarRings.splice(i, 1);
+  }
+}
+
+function drawSonarRings(S) {
+  noFill();
+  for (const ring of sonarRings) {
+    const alpha = 1 - ring.age / CONFIG.SONAR_MAX_AGE;
+    stroke(ring.hue, 80, 70, alpha);
+    strokeWeight(CONFIG.SONAR_RING_WIDTH * S);
+    circle(ring.x * S, ring.y * S, ring.r * 2 * S);
+  }
+}
+
+function drawBallGlow(x, y, hue, r) {
+  const ctx = drawingContext;
+  ctx.save();
+  const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+  grad.addColorStop(0, `hsla(${hue}, 80%, 70%, ${CONFIG.GLOW_ALPHA})`);
+  grad.addColorStop(1, `hsla(${hue}, 80%, 70%, 0)`);
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// ─── Controls ─────────────────────────────────────────────────────────────────
+
+async function togglePlay() {
+  if (!state.audioReady) {
+    await Tone.start();
+    state.audioReady = true;
+    // Fire Big Bang on first play
+    fireBigBang();
+  }
+  state.playing = !state.playing;
+  btnPlay.html(state.playing ? 'Pause' : 'Play');
+}
+
+function resetSim() {
+  state.simFrame = 0;
+  state.triggerPulseFrames = 0;
+  for (const ball of balls) {
+    ball.theta = 0;
+    ball.prevTheta = 0;
+    ball.trailPos = [];
+    ball.lastTriggerFrame = -9999;
+  }
+  if (state.audioReady) {
+    fireBigBang();
+  }
+}
+
+function fireBigBang() {
+  const allNotes = balls.map(b => b.noteName);
+  poly.triggerAttackRelease(allNotes, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
+  state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
+}
+
+// ─── Note range ───────────────────────────────────────────────────────────────
+
+const AUDIBLE_LOW  = 12;  // C0  ≈ 16 Hz  — below this is subsonic
+const AUDIBLE_HIGH = 120; // C10 ≈ 16744 Hz — above this is ultrasonic
+
+function syncNoteRangeUI() {
+  if (!lblLoNote || !lblHiNote || balls.length === 0) return;
+  const midis = balls.map(b => noteToMidi(b.noteName));
+  const loMidi = Math.min(...midis);
+  const hiMidi = Math.max(...midis);
+  lblLoNote.html(formatNoteLabel(loMidi));
+  lblHiNote.html(formatNoteLabel(hiMidi));
+  lblLoNote.style('color', loMidi < AUDIBLE_LOW  ? '#f44' : '#aaa');
+  lblHiNote.style('color', hiMidi > AUDIBLE_HIGH ? '#f44' : '#aaa');
+}
+
+function onCenterNoteChange() {
+  const raw = inpCenterNote.value().trim().toUpperCase();
+  if (/^[A-G]#?\d+$/.test(raw)) {
+    CONFIG.CENTER_NOTE = raw;
+    inpCenterNote.style('border-color', '#444');
+    initBalls(); // syncNoteRangeUI called at end of initBalls
+  } else {
+    inpCenterNote.style('border-color', '#f44');
+  }
+}
+
+// ─── Orbit handlers ───────────────────────────────────────────────────────────
+
+function onPresetChange() {
+  const key = selPreset.value();
+  if (!key) return; // '─ Custom ─' selected, nothing to do
+  const p = PRESETS[key];
+  CONFIG.ORBIT_MODE  = p.mode;
+  CONFIG.ORBIT_LOOP  = p.loop;
+  if (p.mode !== 'factors') CONFIG.ORBIT_BALLS = p.balls;
+  reinitOrbits();
+}
+
+function setOrbitMode(mode) {
+  CONFIG.ORBIT_MODE = mode;
+  selPreset.selected(''); // deselect preset → custom
+  reinitOrbits();
+}
+
+function onOrbitParamChange() {
+  const b = parseInt(inpBalls.value());
+  const l = parseFloat(inpLoop.value());
+  if (CONFIG.ORBIT_MODE !== 'factors' && b >= 1) CONFIG.ORBIT_BALLS = b;
+  if (l >= 1) CONFIG.ORBIT_LOOP = l;
+  selPreset.selected('');
+  reinitOrbits();
+}
+
+function reinitOrbits() {
+  initBalls();   // derives ORBIT_BALLS from periods.length (matters for factors)
+  resetSim();
+  syncOrbitUI();
+}
+
+function syncOrbitUI() {
+  updateModeButtons();
+  const isFactors = CONFIG.ORBIT_MODE === 'factors';
+  inpBalls.elt.disabled = isFactors;
+  inpBalls.style('opacity', isFactors ? '0.4' : '1');
+  inpBalls.value(CONFIG.ORBIT_BALLS); // always sync — shows derived N for factors
+  inpLoop.value(CONFIG.ORBIT_LOOP);
+}
+
+function onSynthChange() {
+  applySynthPreset(selSynth.value());
+}
+
+function onToneDirChange() {
+  CONFIG.TONE_DIRECTION = selToneDir.value();
+  initBalls();
+  resetSim();
+}
+
+function onScaleChange() {
+  CONFIG.SCALE = selScale.value();
+  initBalls();
+  resetSim();
+}
+
+function setToggleActive(btn, active) {
+  btn.html(active ? 'On' : 'Off');
+  btn.style('border-color', active ? '#fff' : '#444');
+  btn.style('color', active ? '#fff' : '#aaa');
+}
+
+function onFlashToggle() {
+  CONFIG.TRIGGER_FLASH = !CONFIG.TRIGGER_FLASH;
+  setToggleActive(btnFlash, CONFIG.TRIGGER_FLASH);
+}
+
+function onAltDirToggle() {
+  CONFIG.ALT_DIRECTION = !CONFIG.ALT_DIRECTION;
+  setToggleActive(btnAltDir, CONFIG.ALT_DIRECTION);
+  balls.forEach((ball, i) => { if (i % 2 === 1) ball.omega = -ball.omega; });
+}
+
+function onSonarToggle() {
+  CONFIG.SONAR_ENABLED = !CONFIG.SONAR_ENABLED;
+  setToggleActive(btnSonar, CONFIG.SONAR_ENABLED);
+  if (!CONFIG.SONAR_ENABLED) sonarRings = [];
+}
+
+function onGlowToggle() {
+  CONFIG.GLOW_ENABLED = !CONFIG.GLOW_ENABLED;
+  setToggleActive(btnGlow, CONFIG.GLOW_ENABLED);
+}
+
+// ─── Recording ────────────────────────────────────────────────────────────────
+
+async function toggleRecord() {
+  if (!state.recording) {
+    await startRecording();
+  } else {
+    await stopRecording();
+  }
+}
+
+async function startRecording() {
+  if (!state.audioReady) {
+    await Tone.start();
+    state.audioReady = true;
+  }
+
+  // Video via MediaRecorder
+  videoChunks = [];
+  const stream = document.querySelector('canvas').captureStream(CONFIG.FPS);
+  videoRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+  videoRecorder.ondataavailable = e => {
+    if (e.data.size > 0) videoChunks.push(e.data);
+  };
+  videoRecorder.onstop = () => {
+    const blob = new Blob(videoChunks, { type: 'video/webm' });
+    downloadBlob(blob, 'orbital.webm');
+    console.log('FFmpeg mux: ffmpeg -i orbital.webm -i orbital.wav -c:v copy -c:a aac orbital_final.mp4');
+  };
+  videoRecorder.start();
+
+  // Audio via Tone.Recorder
+  audioRecorder.start();
+
+  state.recording = true;
+  state.recordStartTime = state.simFrame;
+  state.playing = true;
+  btnPlay.html('Pause');
+  btnRecord.html('Stop Rec');
+}
+
+async function stopRecording() {
+  state.recording = false;
+  btnRecord.html('Record');
+
+  if (videoRecorder && videoRecorder.state !== 'inactive') {
+    videoRecorder.stop();
+  }
+
+  const audioBlob = await audioRecorder.stop();
+  downloadBlob(audioBlob, 'orbital.wav');
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+// ─── TODOs ────────────────────────────────────────────────────────────────────
+
+// TODO: Full-res export
+//   CONFIG.PREVIEW_SCALE = 1.0 path (or separate EXPORT_SCALE config value)
+//   All drawing already scales — just change the multiplier
