@@ -32,6 +32,35 @@ let sonarRings = []; // { x, y, r, age, hue } all in native px
 // Derived scale constants (set in initBalls)
 const TWO_PI = Math.PI * 2;
 
+// ─── Settings persistence ─────────────────────────────────────────────────────
+
+const SETTINGS_KEY = 'orbital_config';
+
+function saveSettings() {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(CONFIG)); } catch (e) {}
+}
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (raw) Object.assign(CONFIG, JSON.parse(raw));
+  } catch (e) {}
+}
+
+function syncToggleButtons() {
+  setToggleActive(btnAltDir,        CONFIG.ALT_DIRECTION);
+  setToggleActive(btnFlash,         CONFIG.TRIGGER_FLASH);
+  setToggleActive(btnSonar,         CONFIG.SONAR_ENABLED);
+  setToggleActive(btnGlow,          CONFIG.GLOW_ENABLED);
+  setToggleActive(btnFling,         CONFIG.TRAIL_FLING);
+  setToggleActive(btnPeriodTrail,   CONFIG.PERIOD_TRAIL);
+  setToggleActive(btnConstellation, CONFIG.CONSTELLATION_ENABLED);
+  setToggleActive(btnAfterglow,     CONFIG.AFTERGLOW_ENABLED);
+  setToggleActive(btnGravity,       CONFIG.GRAVITY_ENABLED);
+  divGravityControls.style('display',   CONFIG.GRAVITY_ENABLED   ? 'block' : 'none');
+  divAfterglowControls.style('display', CONFIG.AFTERGLOW_ENABLED ? 'block' : 'none');
+}
+
 // ─── Note utilities ───────────────────────────────────────────────────────────
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -101,6 +130,8 @@ function buildNoteListCentered(centerNote, scaleName, N) {
       else if (up < sorted.length) result.push(midiToNoteOrHz(sorted[up++]));
     }
   }
+  // If N exceeds available unique notes, cycle from the beginning
+  while (result.length < N) result.push(result[result.length % sorted.length]);
   return result; // [center, +1, −1, +2, −2, …]
 }
 
@@ -223,9 +254,10 @@ function setup() {
   colorMode(HSL, 360, 100, 100, 1);
   textFont('monospace');
 
-  initAudio();
+  loadSettings();
   initBalls();
   buildUI();
+  syncToggleButtons();
 }
 
 // ─── UI construction ──────────────────────────────────────────────────────────
@@ -399,6 +431,14 @@ function buildUI() {
   inpGravityStrength.value(CONFIG.GRAVITY_STRENGTH); inpGravityStrength.style('width', '100%'); inpGravityStrength.style('cursor', 'pointer');
   inpGravityStrength.input(() => { CONFIG.GRAVITY_STRENGTH = parseFloat(inpGravityStrength.value()); });
   addLabeledFull('Well Strength', inpGravityStrength, divGravityControls);
+
+  // ── RESTORE DEFAULTS ─────────────────────────────────────────────────────────
+  const resetWrap = createDiv(''); resetWrap.parent(panel);
+  resetWrap.style('padding', '14px');
+  const btnDefaults = createButton('Restore Defaults'); styleBtn(btnDefaults);
+  btnDefaults.style('width', '100%'); btnDefaults.style('color', '#888');
+  btnDefaults.parent(resetWrap);
+  btnDefaults.mousePressed(() => { localStorage.removeItem(SETTINGS_KEY); location.reload(); });
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -530,7 +570,7 @@ function updateModeButtons() {
 
 function draw() {
   const S = CONFIG.PREVIEW_SCALE;
-  if (CONFIG.AFTERGLOW_ENABLED) {
+  if (CONFIG.AFTERGLOW_ENABLED && state.playing) {
     noStroke(); fill(0, 0, 5, CONFIG.AFTERGLOW_FADE);
     rect(0, 0, width, height);
   } else {
@@ -555,6 +595,9 @@ function draw() {
   if (state.recordPhase === 'audio' && state.simFrame / CONFIG.FPS >= CONFIG.ORBIT_LOOP) {
     endAudioPass();
   }
+
+  // Persist settings every ~5 seconds
+  if (frameCount % 300 === 0) saveSettings();
 }
 
 // ─── Physics update ───────────────────────────────────────────────────────────
@@ -679,6 +722,7 @@ function drawTriggerLine(S) {
 }
 
 function drawOrbits(S) {
+  if (CONFIG.AFTERGLOW_ENABLED) return; // orbits would accumulate before balls travel there
   const CX = CONFIG.NATIVE_W / 2 * S;
   const CY = CONFIG.NATIVE_H / 2 * S;
   noFill();
@@ -836,9 +880,9 @@ function drawBallGlow(x, y, hue, r) {
 
 async function togglePlay() {
   if (!state.audioReady) {
+    initAudio();
     await Tone.start();
     state.audioReady = true;
-    // Fire Big Bang on first play
     fireBigBang();
   }
   state.playing = !state.playing;
@@ -1034,6 +1078,7 @@ function onRecordClick() {
 
 async function startRecording() {
   if (!state.audioReady) {
+    initAudio();
     await Tone.start();
     state.audioReady = true;
   }
