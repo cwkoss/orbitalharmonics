@@ -5,16 +5,12 @@
 let balls = [];
 let poly, comp, lim, audioRecorder, spaceReverb;
 let currentSynthNodes = [];
-let videoRecorder, videoChunks = [];
-
 let state = {
   playing: false,
   simFrame: 0,
   triggerPulseFrames: 0,
   audioReady: false,
   recordPhase: null,       // null | 'video' | 'audio'
-  recordTotalFrames: 0,    // used for progress %
-  audioPassResolve: null,  // resolves doAudioPass() when draw() signals completion
 };
 
 // p5.dom UI elements
@@ -26,6 +22,7 @@ let btnAfterglow, inpAfterglowFade, divAfterglowControls;
 let inpSpace;
 let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
 let inpCenterNote, lblLoNote, lblHiNote;
+let divRecordProgress, barRecordFill, lblRecordStatus, lblRecordCmd;
 
 let sonarRings = []; // { x, y, r, age, hue } all in native px
 
@@ -274,6 +271,24 @@ function buildUI() {
 
   btnRecord = createButton('Record'); styleBtn(btnRecord); btnRecord.mousePressed(onRecordClick);
   btnRecord.style('width', '100%'); btnRecord.parent(ctrlBody);
+
+  // Recording progress bar (hidden until recording)
+  divRecordProgress = createDiv(''); divRecordProgress.parent(ctrlBody);
+  divRecordProgress.style('display', 'none'); divRecordProgress.style('margin-top', '4px');
+  lblRecordStatus = createDiv(''); lblRecordStatus.parent(divRecordProgress);
+  lblRecordStatus.style('color', '#aaa'); lblRecordStatus.style('font-size', '10px');
+  lblRecordStatus.style('margin-bottom', '3px');
+  const barTrack = createDiv(''); barTrack.parent(divRecordProgress);
+  barTrack.style('background', '#111'); barTrack.style('border', '1px solid #333');
+  barTrack.style('height', '6px'); barTrack.style('border-radius', '3px');
+  barTrack.style('overflow', 'hidden');
+  barRecordFill = createDiv(''); barRecordFill.parent(barTrack);
+  barRecordFill.style('height', '100%'); barRecordFill.style('width', '0%');
+  barRecordFill.style('border-radius', '3px'); barRecordFill.style('transition', 'width 0.3s');
+  lblRecordCmd = createDiv(''); lblRecordCmd.parent(divRecordProgress);
+  lblRecordCmd.style('display', 'none'); lblRecordCmd.style('margin-top', '5px');
+  lblRecordCmd.style('color', '#8f8'); lblRecordCmd.style('font-size', '9px');
+  lblRecordCmd.style('word-break', 'break-all'); lblRecordCmd.style('user-select', 'all');
 
   // ── ORBITS ──────────────────────────────────────────────────────────────────
   const orbBody = makeSection('Orbits', panel);
@@ -590,11 +605,6 @@ function draw() {
   drawSonarRings(S);
   drawBalls(S);
   drawHUD(S);
-
-  // Auto-stop audio pass when sim reaches one full loop
-  if (state.recordPhase === 'audio' && state.simFrame / CONFIG.FPS >= CONFIG.ORBIT_LOOP) {
-    endAudioPass();
-  }
 
   // Persist settings every ~5 seconds
   if (frameCount % 300 === 0) saveSettings();
@@ -1068,6 +1078,13 @@ function onGravityToggle() {
 
 // ─── Recording ────────────────────────────────────────────────────────────────
 
+function updateRecordProgress(phase, frac) {
+  const pct = Math.min(100, Math.round(frac * 100));
+  lblRecordStatus.html(`${phase} — ${pct}%`);
+  barRecordFill.style('width', pct + '%');
+  barRecordFill.style('background', phase === 'VIDEO' ? '#c04040' : '#40a060');
+}
+
 function onRecordClick() {
   if (state.recordPhase) {
     cancelRecording();
@@ -1077,15 +1094,32 @@ function onRecordClick() {
 }
 
 async function startRecording() {
-  if (!state.audioReady) {
-    initAudio();
-    await Tone.start();
-    state.audioReady = true;
+  try {
+    if (!state.audioReady) {
+      initAudio();
+      await Tone.start();
+      state.audioReady = true;
+    }
+    btnRecord.html('Stop');
+    divRecordProgress.style('display', 'block');
+    lblRecordCmd.style('display', 'none');
+    updateRecordProgress('VIDEO', 0);
+    await doVideoPass();
+    if (!state.recordPhase) return; // cancelled mid-video
+    await doAudioPass();
+  } catch (err) {
+    console.error('Recording failed:', err);
+    lblRecordStatus.html('Error: ' + err.message);
+    barRecordFill.style('background', '#c00');
+    cancelRecording();
+    divRecordProgress.style('display', 'block'); // keep visible so user sees error
+    return;
   }
-  btnRecord.html('Stop');
-  await doVideoPass();
-  if (!state.recordPhase) return; // cancelled mid-video
-  await doAudioPass();
+  lblRecordStatus.html('Complete! Try:');
+  barRecordFill.style('width', '100%');
+  barRecordFill.style('background', '#40a060');
+  lblRecordCmd.html(`ffmpeg -i orbital_video.mp4 -i orbital_audio.wav -c:v copy -c:a aac orbital_final.mp4`);
+  lblRecordCmd.style('display', 'block');
   btnRecord.html('Record');
 }
 
@@ -1093,67 +1127,118 @@ async function doVideoPass() {
   resetSim();
   state.playing = true;
   state.recordPhase = 'video';
-  state.recordTotalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
+  const totalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
 
-  // Mute audio output — notes still trigger internally for timing, but no sound
   Tone.Destination.volume.value = -Infinity;
 
-  videoChunks = [];
+  if (typeof VideoEncoder === 'undefined') throw new Error('VideoEncoder not available — use Chrome 94+ or Edge 94+');
+  const { Muxer, ArrayBufferTarget } = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5/+esm');
+
   const canvas = document.querySelector('canvas');
-  const stream = canvas.captureStream(0); // 0 = manual frame push
-  const videoTrack = stream.getVideoTracks()[0];
-  videoRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-  videoRecorder.ondataavailable = e => { if (e.data.size > 0) videoChunks.push(e.data); };
-  videoRecorder.start();
-
-  noLoop(); // take manual control of draw loop
-  for (let f = 0; f < state.recordTotalFrames; f++) {
-    if (!state.recordPhase) break; // cancelled
-    draw();                  // advance sim + render one frame
-    videoTrack.requestFrame(); // push that frame to the recorder
-    if (f % 30 === 0) await new Promise(r => setTimeout(r, 0)); // yield to browser
-  }
-  loop(); // restore p5's draw loop
-
-  Tone.Destination.volume.value = 0; // restore audio
-
-  if (!state.recordPhase) {
-    videoRecorder.stop();
-    return;
-  }
-
-  await new Promise(resolve => {
-    videoRecorder.addEventListener('stop', () => {
-      downloadBlob(new Blob(videoChunks, { type: 'video/webm' }), 'orbital_video.webm');
-      resolve();
-    }, { once: true });
-    videoRecorder.stop();
+  const target = new ArrayBufferTarget();
+  const muxer = new Muxer({
+    target,
+    video: { codec: 'avc', width: canvas.width, height: canvas.height, frameRate: CONFIG.FPS },
+    fastStart: 'in-memory',
   });
+
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: e => { throw e; },
+  });
+  encoder.configure({
+    codec: 'avc1.42E01E',
+    width: canvas.width,
+    height: canvas.height,
+    bitrate: 8_000_000,
+    framerate: CONFIG.FPS,
+  });
+
+  noLoop(); // manual frame control — every frame rendered exactly once
+  try {
+    for (let f = 0; f < totalFrames; f++) {
+      if (!state.recordPhase) break; // cancelled
+      draw();
+      const frame = new VideoFrame(canvas, { timestamp: Math.round(f * 1_000_000 / CONFIG.FPS) });
+      encoder.encode(frame, { keyFrame: f % 60 === 0 });
+      frame.close();
+      if (f % 30 === 0) {
+        updateRecordProgress('VIDEO', f / totalFrames);
+        await new Promise(r => setTimeout(r, 0)); // yield so cancel can land
+      }
+    }
+  } finally {
+    loop();
+    Tone.Destination.volume.value = 0;
+  }
+
+  if (!state.recordPhase) { encoder.close(); return; } // cancelled
+
+  updateRecordProgress('VIDEO', 1);
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
+  downloadBlob(new Blob([target.buffer], { type: 'video/mp4' }), 'orbital_video.mp4');
 }
 
 async function doAudioPass() {
-  resetSim();
-  state.playing = true;
   state.recordPhase = 'audio';
-  state.recordTotalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
-  btnPlay.html('Pause');
+  lblRecordStatus.html('AUDIO — rendering offline…');
+  barRecordFill.style('width', '60%');
+  barRecordFill.style('background', '#40a060');
 
-  audioRecorder.start();
+  // Precompute exact trigger times from ball periods — matches video frame-by-frame
+  const noteDuration = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration;
+  const byTime = new Map();
+  const addNote = (t, note) => {
+    const key = t.toFixed(6);
+    if (!byTime.has(key)) byTime.set(key, { time: t, notes: [] });
+    byTime.get(key).notes.push(note);
+  };
+  for (const ball of balls) {
+    for (let k = 0; k * ball.period <= CONFIG.ORBIT_LOOP + 1e-9; k++) {
+      addNote(k * ball.period, ball.noteName);
+    }
+  }
 
-  // draw() auto-stops the audio pass by calling endAudioPass() at ORBIT_LOOP
-  await new Promise(resolve => { state.audioPassResolve = resolve; });
+  const tailSec = Math.min(CONFIG.SPACE_WET > 0 ? CONFIG.SPACE_REVERB_DECAY * 3 : 0, 8);
+  const buffer = await Tone.Offline(async () => {
+    const offlineComp = new Tone.Compressor({ threshold: CONFIG.COMPRESSOR_THRESHOLD, ratio: CONFIG.COMPRESSOR_RATIO, attack: 0.003, release: 0.25 });
+    const offlineLim  = new Tone.Limiter(CONFIG.LIMITER_CEILING);
+    const offlineRev  = new Tone.Reverb({ decay: CONFIG.SPACE_REVERB_DECAY, wet: CONFIG.SPACE_WET });
+    offlineRev.connect(offlineComp);
+    offlineComp.connect(offlineLim);
+    offlineLim.toDestination();
+    const built = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].build();
+    built.output.connect(offlineRev);
+    await offlineRev.ready;
+    for (const { time, notes } of byTime.values()) {
+      built.poly.triggerAttackRelease(notes, noteDuration, time);
+    }
+  }, CONFIG.ORBIT_LOOP + tailSec);
 
-  const audioBlob = await audioRecorder.stop();
-  downloadBlob(audioBlob, 'orbital_audio.wav');
-  console.log('Mux: ffmpeg -i orbital_video.webm -i orbital_audio.wav -c:v copy -c:a aac orbital_final.mp4');
+  if (!state.recordPhase) return; // cancelled — discard
+  downloadBlob(audioBufferToWav(buffer, CONFIG.ORBIT_LOOP), 'orbital_audio.wav');
+  state.recordPhase = null;
 }
 
-function endAudioPass() {
-  if (state.recordPhase !== 'audio') return;
-  state.recordPhase = null;
-  state.playing = false;
-  btnPlay.html('Play');
-  if (state.audioPassResolve) { state.audioPassResolve(); state.audioPassResolve = null; }
+function audioBufferToWav(buffer, trimSecs) {
+  const nCh = buffer.numberOfChannels;
+  const sr  = buffer.sampleRate;
+  const nSamples = trimSecs ? Math.min(Math.floor(trimSecs * sr), buffer.length) : buffer.length;
+  const ab = new ArrayBuffer(44 + nSamples * nCh * 4);
+  const v  = new DataView(ab);
+  const ws = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + nSamples * nCh * 4, true);
+  ws(8, 'WAVE'); ws(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 3, true); // IEEE float
+  v.setUint16(22, nCh, true); v.setUint32(24, sr, true);
+  v.setUint32(28, sr * nCh * 4, true); v.setUint16(32, nCh * 4, true); v.setUint16(34, 32, true);
+  ws(36, 'data'); v.setUint32(40, nSamples * nCh * 4, true);
+  const ch = Array.from({ length: nCh }, (_, c) => buffer.getChannelData(c));
+  let off = 44;
+  for (let i = 0; i < nSamples; i++) for (let c = 0; c < nCh; c++) { v.setFloat32(off, ch[c][i] || 0, true); off += 4; }
+  return new Blob([ab], { type: 'audio/wav' });
 }
 
 function cancelRecording() {
@@ -1161,12 +1246,9 @@ function cancelRecording() {
   state.recordPhase = null;
   state.playing = false;
   Tone.Destination.volume.value = 0;
-  loop();
-  if (videoRecorder && videoRecorder.state !== 'inactive') videoRecorder.stop();
-  if (wasPhase === 'audio') {
-    audioRecorder.stop().then(blob => downloadBlob(blob, 'orbital_audio_partial.wav')).catch(() => {});
-    if (state.audioPassResolve) { state.audioPassResolve(); state.audioPassResolve = null; }
-  }
+  loop(); // restore p5 loop in case we were in noLoop() during video pass
+  divRecordProgress.style('display', 'none');
+  lblRecordCmd.style('display', 'none');
   btnRecord.html('Record');
   btnPlay.html('Play');
 }
