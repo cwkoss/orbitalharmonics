@@ -9,18 +9,20 @@ let videoRecorder, videoChunks = [];
 
 let state = {
   playing: false,
-  recording: false,
   simFrame: 0,
   triggerPulseFrames: 0,
   audioReady: false,
-  recordStartTime: 0,
+  recordPhase: null,       // null | 'video' | 'audio'
+  recordTotalFrames: 0,    // used for progress %
+  audioPassResolve: null,  // resolves doAudioPass() when draw() signals completion
 };
 
 // p5.dom UI elements
 let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
-let btnAltDir, btnSonar, btnGlow, btnFlash, btnFling, btnPeriodTrail, inpTrailLen;
+let btnAltDir, btnSonar, btnGlow, btnFlash, btnFling, btnPeriodTrail, inpTrailLen, inpBallSize;
 let selColorMode, btnConstellation, inpConstellationThresh;
-let btnGravity, inpGravityX, inpGravityY, inpGravityStrength;
+let btnGravity, inpGravityX, inpGravityY, inpGravityStrength, divGravityControls;
+let btnAfterglow, inpAfterglowFade, divAfterglowControls;
 let inpSpace;
 let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
 let inpCenterNote, lblLoNote, lblHiNote;
@@ -238,7 +240,7 @@ function buildUI() {
   btnPlay = createButton('Play'); styleBtn(btnPlay); btnPlay.mousePressed(togglePlay); btnPlay.parent(ctrlBtns);
   btnReset = createButton('Reset'); styleBtn(btnReset); btnReset.mousePressed(resetSim); btnReset.parent(ctrlBtns);
 
-  btnRecord = createButton('Record'); styleBtn(btnRecord); btnRecord.mousePressed(toggleRecord);
+  btnRecord = createButton('Record'); styleBtn(btnRecord); btnRecord.mousePressed(onRecordClick);
   btnRecord.style('width', '100%'); btnRecord.parent(ctrlBody);
 
   // ── ORBITS ──────────────────────────────────────────────────────────────────
@@ -337,6 +339,12 @@ function buildUI() {
   btnFling = createButton('Off'); styleBtn(btnFling); btnFling.mousePressed(onFlingToggle);
   addToggleRow('Fling', btnFling, visBody);
 
+  inpBallSize = createElement('input'); inpBallSize.attribute('type', 'number');
+  inpBallSize.attribute('min', '1'); inpBallSize.attribute('max', '100');
+  inpBallSize.value(CONFIG.BALL_SIZE_PX); styleNumberInput(inpBallSize);
+  inpBallSize.input(() => { const v = parseInt(inpBallSize.value()); if (v >= 1 && v <= 100) CONFIG.BALL_SIZE_PX = v; });
+  addLabeledFull('Ball Size', inpBallSize, visBody);
+
   inpTrailLen = createElement('input'); inpTrailLen.attribute('type', 'number');
   inpTrailLen.attribute('min', '1'); inpTrailLen.attribute('max', '1000');
   inpTrailLen.value(CONFIG.TRAIL_LENGTH); styleNumberInput(inpTrailLen);
@@ -356,26 +364,41 @@ function buildUI() {
   inpConstellationThresh.input(() => { CONFIG.CONSTELLATION_PHASE_THRESH = parseFloat(inpConstellationThresh.value()); });
   addLabeledFull('Phase Thresh', inpConstellationThresh, visBody);
 
+  btnAfterglow = createButton('Off'); styleBtn(btnAfterglow); btnAfterglow.mousePressed(onAfterglowToggle);
+  addToggleRow('Afterglow', btnAfterglow, visBody);
+
+  divAfterglowControls = createDiv(''); divAfterglowControls.parent(visBody);
+  divAfterglowControls.style('display', 'none');
+
+  inpAfterglowFade = createElement('input'); inpAfterglowFade.attribute('type', 'range');
+  inpAfterglowFade.attribute('min', '0'); inpAfterglowFade.attribute('max', '0.3'); inpAfterglowFade.attribute('step', '0.005');
+  inpAfterglowFade.value(CONFIG.AFTERGLOW_FADE); inpAfterglowFade.style('width', '100%'); inpAfterglowFade.style('cursor', 'pointer');
+  inpAfterglowFade.input(() => { CONFIG.AFTERGLOW_FADE = parseFloat(inpAfterglowFade.value()); });
+  addLabeledFull('Fade', inpAfterglowFade, divAfterglowControls);
+
   btnGravity = createButton('Off'); styleBtn(btnGravity); btnGravity.mousePressed(onGravityToggle);
   addToggleRow('Gravity Well', btnGravity, visBody);
+
+  divGravityControls = createDiv(''); divGravityControls.parent(visBody);
+  divGravityControls.style('display', 'none');
 
   inpGravityX = createElement('input'); inpGravityX.attribute('type', 'range');
   inpGravityX.attribute('min', '0'); inpGravityX.attribute('max', '1'); inpGravityX.attribute('step', '0.01');
   inpGravityX.value(CONFIG.GRAVITY_X); inpGravityX.style('width', '100%'); inpGravityX.style('cursor', 'pointer');
   inpGravityX.input(() => { CONFIG.GRAVITY_X = parseFloat(inpGravityX.value()); });
-  addLabeledFull('Well X', inpGravityX, visBody);
+  addLabeledFull('Well X', inpGravityX, divGravityControls);
 
   inpGravityY = createElement('input'); inpGravityY.attribute('type', 'range');
   inpGravityY.attribute('min', '0'); inpGravityY.attribute('max', '1'); inpGravityY.attribute('step', '0.01');
   inpGravityY.value(CONFIG.GRAVITY_Y); inpGravityY.style('width', '100%'); inpGravityY.style('cursor', 'pointer');
   inpGravityY.input(() => { CONFIG.GRAVITY_Y = parseFloat(inpGravityY.value()); });
-  addLabeledFull('Well Y', inpGravityY, visBody);
+  addLabeledFull('Well Y', inpGravityY, divGravityControls);
 
   inpGravityStrength = createElement('input'); inpGravityStrength.attribute('type', 'range');
   inpGravityStrength.attribute('min', '0'); inpGravityStrength.attribute('max', '1'); inpGravityStrength.attribute('step', '0.01');
   inpGravityStrength.value(CONFIG.GRAVITY_STRENGTH); inpGravityStrength.style('width', '100%'); inpGravityStrength.style('cursor', 'pointer');
   inpGravityStrength.input(() => { CONFIG.GRAVITY_STRENGTH = parseFloat(inpGravityStrength.value()); });
-  addLabeledFull('Well Strength', inpGravityStrength, visBody);
+  addLabeledFull('Well Strength', inpGravityStrength, divGravityControls);
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -507,7 +530,12 @@ function updateModeButtons() {
 
 function draw() {
   const S = CONFIG.PREVIEW_SCALE;
-  background(0, 0, 5); // very dark, not pure black for trail blending
+  if (CONFIG.AFTERGLOW_ENABLED) {
+    noStroke(); fill(0, 0, 5, CONFIG.AFTERGLOW_FADE);
+    rect(0, 0, width, height);
+  } else {
+    background(0, 0, 5);
+  }
 
   if (state.playing) {
     updateBalls();
@@ -523,12 +551,9 @@ function draw() {
   drawBalls(S);
   drawHUD(S);
 
-  // Auto-stop recording after RECORD_DURATION
-  if (state.recording) {
-    const elapsed = (state.simFrame - state.recordStartTime) / CONFIG.FPS;
-    if (elapsed >= CONFIG.ORBIT_LOOP) {
-      stopRecording();
-    }
+  // Auto-stop audio pass when sim reaches one full loop
+  if (state.recordPhase === 'audio' && state.simFrame / CONFIG.FPS >= CONFIG.ORBIT_LOOP) {
+    endAudioPass();
   }
 }
 
@@ -635,7 +660,7 @@ function gravityDisplace(nx, ny) {
   const dy = gy - ny;
   const dist = Math.sqrt(dx * dx + dy * dy);
   const safeDist = Math.max(dist, 20);
-  const force = (CONFIG.GRAVITY_STRENGTH * 80) / (safeDist * 0.05 + 1);
+  const force = (CONFIG.GRAVITY_STRENGTH * 400) / (safeDist * 0.003 + 1);
   return { dx: (dx / safeDist) * force, dy: (dy / safeDist) * force };
 }
 
@@ -766,12 +791,14 @@ function drawHUD(S) {
   textAlign(CENTER, CENTER);
   text('ORBITAL', CONFIG.NATIVE_W / 2 * S, CONFIG.NATIVE_H / 2 * S);
 
-  // Recording indicator
-  if (state.recording) {
-    fill(0, 90, 60, 0.9);
+  // Recording phase indicator with progress
+  if (state.recordPhase) {
+    const pct = state.recordTotalFrames > 0 ? Math.round(state.simFrame / state.recordTotalFrames * 100) : 0;
+    const label = state.recordPhase === 'video' ? `● VIDEO ${pct}%` : `● AUDIO ${pct}%`;
+    fill(state.recordPhase === 'video' ? 0 : 120, 90, 70, 0.9);
     textSize(11 * S);
     textAlign(RIGHT, TOP);
-    text('● REC', (CONFIG.NATIVE_W - 8) * S, 8 * S);
+    text(label, (CONFIG.NATIVE_W - 8) * S, 8 * S);
   }
 }
 
@@ -983,18 +1010,25 @@ function onConstellationToggle() {
   setToggleActive(btnConstellation, CONFIG.CONSTELLATION_ENABLED);
 }
 
+function onAfterglowToggle() {
+  CONFIG.AFTERGLOW_ENABLED = !CONFIG.AFTERGLOW_ENABLED;
+  setToggleActive(btnAfterglow, CONFIG.AFTERGLOW_ENABLED);
+  divAfterglowControls.style('display', CONFIG.AFTERGLOW_ENABLED ? 'block' : 'none');
+}
+
 function onGravityToggle() {
   CONFIG.GRAVITY_ENABLED = !CONFIG.GRAVITY_ENABLED;
   setToggleActive(btnGravity, CONFIG.GRAVITY_ENABLED);
+  divGravityControls.style('display', CONFIG.GRAVITY_ENABLED ? 'block' : 'none');
 }
 
 // ─── Recording ────────────────────────────────────────────────────────────────
 
-async function toggleRecord() {
-  if (!state.recording) {
-    await startRecording();
+function onRecordClick() {
+  if (state.recordPhase) {
+    cancelRecording();
   } else {
-    await stopRecording();
+    startRecording();
   }
 }
 
@@ -1003,41 +1037,93 @@ async function startRecording() {
     await Tone.start();
     state.audioReady = true;
   }
-
-  // Video via MediaRecorder
-  videoChunks = [];
-  const stream = document.querySelector('canvas').captureStream(CONFIG.FPS);
-  videoRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
-  videoRecorder.ondataavailable = e => {
-    if (e.data.size > 0) videoChunks.push(e.data);
-  };
-  videoRecorder.onstop = () => {
-    const blob = new Blob(videoChunks, { type: 'video/webm' });
-    downloadBlob(blob, 'orbital.webm');
-    console.log('FFmpeg mux: ffmpeg -i orbital.webm -i orbital.wav -c:v copy -c:a aac orbital_final.mp4');
-  };
-  videoRecorder.start();
-
-  // Audio via Tone.Recorder
-  audioRecorder.start();
-
-  state.recording = true;
-  state.recordStartTime = state.simFrame;
-  state.playing = true;
-  btnPlay.html('Pause');
-  btnRecord.html('Stop Rec');
+  btnRecord.html('Stop');
+  await doVideoPass();
+  if (!state.recordPhase) return; // cancelled mid-video
+  await doAudioPass();
+  btnRecord.html('Record');
 }
 
-async function stopRecording() {
-  state.recording = false;
-  btnRecord.html('Record');
+async function doVideoPass() {
+  resetSim();
+  state.playing = true;
+  state.recordPhase = 'video';
+  state.recordTotalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
 
-  if (videoRecorder && videoRecorder.state !== 'inactive') {
+  // Mute audio output — notes still trigger internally for timing, but no sound
+  Tone.Destination.volume.value = -Infinity;
+
+  videoChunks = [];
+  const canvas = document.querySelector('canvas');
+  const stream = canvas.captureStream(0); // 0 = manual frame push
+  const videoTrack = stream.getVideoTracks()[0];
+  videoRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
+  videoRecorder.ondataavailable = e => { if (e.data.size > 0) videoChunks.push(e.data); };
+  videoRecorder.start();
+
+  noLoop(); // take manual control of draw loop
+  for (let f = 0; f < state.recordTotalFrames; f++) {
+    if (!state.recordPhase) break; // cancelled
+    draw();                  // advance sim + render one frame
+    videoTrack.requestFrame(); // push that frame to the recorder
+    if (f % 30 === 0) await new Promise(r => setTimeout(r, 0)); // yield to browser
+  }
+  loop(); // restore p5's draw loop
+
+  Tone.Destination.volume.value = 0; // restore audio
+
+  if (!state.recordPhase) {
     videoRecorder.stop();
+    return;
   }
 
+  await new Promise(resolve => {
+    videoRecorder.addEventListener('stop', () => {
+      downloadBlob(new Blob(videoChunks, { type: 'video/webm' }), 'orbital_video.webm');
+      resolve();
+    }, { once: true });
+    videoRecorder.stop();
+  });
+}
+
+async function doAudioPass() {
+  resetSim();
+  state.playing = true;
+  state.recordPhase = 'audio';
+  state.recordTotalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
+  btnPlay.html('Pause');
+
+  audioRecorder.start();
+
+  // draw() auto-stops the audio pass by calling endAudioPass() at ORBIT_LOOP
+  await new Promise(resolve => { state.audioPassResolve = resolve; });
+
   const audioBlob = await audioRecorder.stop();
-  downloadBlob(audioBlob, 'orbital.wav');
+  downloadBlob(audioBlob, 'orbital_audio.wav');
+  console.log('Mux: ffmpeg -i orbital_video.webm -i orbital_audio.wav -c:v copy -c:a aac orbital_final.mp4');
+}
+
+function endAudioPass() {
+  if (state.recordPhase !== 'audio') return;
+  state.recordPhase = null;
+  state.playing = false;
+  btnPlay.html('Play');
+  if (state.audioPassResolve) { state.audioPassResolve(); state.audioPassResolve = null; }
+}
+
+function cancelRecording() {
+  const wasPhase = state.recordPhase;
+  state.recordPhase = null;
+  state.playing = false;
+  Tone.Destination.volume.value = 0;
+  loop();
+  if (videoRecorder && videoRecorder.state !== 'inactive') videoRecorder.stop();
+  if (wasPhase === 'audio') {
+    audioRecorder.stop().then(blob => downloadBlob(blob, 'orbital_audio_partial.wav')).catch(() => {});
+    if (state.audioPassResolve) { state.audioPassResolve(); state.audioPassResolve = null; }
+  }
+  btnRecord.html('Record');
+  btnPlay.html('Play');
 }
 
 function downloadBlob(blob, filename) {

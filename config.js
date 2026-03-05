@@ -208,6 +208,10 @@ const CONFIG = {
   CONSTELLATION_ALPHA_MAX: 0.35,
   CONSTELLATION_LINE_WIDTH: 1,
 
+  // Afterglow — frame persistence instead of clearing each frame
+  AFTERGLOW_ENABLED: false,
+  AFTERGLOW_FADE: 0.04,   // 0 = infinite persistence, higher = faster fade
+
   // Gravity well (visual only — does not affect physics)
   GRAVITY_ENABLED: false,
   GRAVITY_X: 0.6,
