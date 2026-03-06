@@ -210,8 +210,9 @@ function initBalls() {
   const N = periods.length;
   const scaleName = CONFIG.SCALE;
 
-  // Build note list centered on CENTER_NOTE, alternating up/down through scale
+  // Select notes from center outward, then sort by pitch for assignment
   const noteList = buildNoteListCentered(CONFIG.CENTER_NOTE, scaleName, N);
+  const sortedNotes = [...noteList].sort((a, b) => noteToMidi(a) - noteToMidi(b));
 
   for (let i = 0; i < N; i++) {
     const T = periods[i];
@@ -221,8 +222,8 @@ function initBalls() {
     // Tone direction: 'low_outside' → inner=high, outer=low (default)
     //                'low_inside'  → inner=low, outer=high
     const noteName = CONFIG.TONE_DIRECTION === 'low_inside'
-      ? noteList[i]
-      : noteList[N - 1 - i];
+      ? sortedNotes[i]
+      : sortedNotes[N - 1 - i];
 
     const sign = (CONFIG.ALT_DIRECTION && i % 2 === 1) ? -1 : 1;
     balls.push({
