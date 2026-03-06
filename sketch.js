@@ -245,6 +245,7 @@ function initBalls() {
 
 function setup() {
   const S = CONFIG.PREVIEW_SCALE;
+  pixelDensity(1); // force 1x — prevents odd canvas dimensions on high-DPI displays
   const cnv = createCanvas(CONFIG.NATIVE_W * S, CONFIG.NATIVE_H * S);
   cnv.parent('canvas-container');
   frameRate(CONFIG.FPS);
@@ -269,7 +270,7 @@ function buildUI() {
   btnPlay = createButton('Play'); styleBtn(btnPlay); btnPlay.mousePressed(togglePlay); btnPlay.parent(ctrlBtns);
   btnReset = createButton('Reset'); styleBtn(btnReset); btnReset.mousePressed(resetSim); btnReset.parent(ctrlBtns);
 
-  btnRecord = createButton('Record'); styleBtn(btnRecord); btnRecord.mousePressed(onRecordClick);
+  btnRecord = createButton('Export'); styleBtn(btnRecord); btnRecord.mousePressed(onRecordClick);
   btnRecord.style('width', '100%'); btnRecord.parent(ctrlBody);
 
   // Recording progress bar (hidden until recording)
@@ -604,10 +605,11 @@ function draw() {
   drawConstellations(S);
   drawSonarRings(S);
   drawBalls(S);
-  drawHUD(S);
+  if (!state.recordPhase) drawHUD(S);
 
   // Persist settings every ~5 seconds
   if (frameCount % 300 === 0) saveSettings();
+
 }
 
 // ─── Physics update ───────────────────────────────────────────────────────────
@@ -1120,7 +1122,7 @@ async function startRecording() {
   barRecordFill.style('background', '#40a060');
   lblRecordCmd.html(`ffmpeg -i orbital_video.mp4 -i orbital_audio.wav -c:v copy -c:a aac orbital_final.mp4`);
   lblRecordCmd.style('display', 'block');
-  btnRecord.html('Record');
+  btnRecord.html('Export');
 }
 
 async function doVideoPass() {
@@ -1128,13 +1130,18 @@ async function doVideoPass() {
   state.playing = true;
   state.recordPhase = 'video';
   const totalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
-
   Tone.Destination.volume.value = -Infinity;
 
   if (typeof VideoEncoder === 'undefined') throw new Error('VideoEncoder not available — use Chrome 94+ or Edge 94+');
   const { Muxer, ArrayBufferTarget } = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5/+esm');
 
-  const canvas = document.querySelector('canvas');
+  // Scale up to native resolution for export
+  const prevScale = CONFIG.PREVIEW_SCALE;
+  CONFIG.PREVIEW_SCALE = 1.0;
+  resizeCanvas(CONFIG.NATIVE_W, CONFIG.NATIVE_H, true);
+  select('#canvas-container').style('visibility', 'hidden');
+
+  const canvas = drawingContext.canvas; // now 1080×1920
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
     target,
@@ -1147,32 +1154,35 @@ async function doVideoPass() {
     error: e => { throw e; },
   });
   encoder.configure({
-    codec: 'avc1.42E01E',
+    codec: 'avc1.640032',   // H.264 High profile, Level 5.0 — handles 1080×1920@60
     width: canvas.width,
     height: canvas.height,
-    bitrate: 8_000_000,
+    bitrate: 15_000_000,    // 15 Mbps for full-res
     framerate: CONFIG.FPS,
   });
 
-  noLoop(); // manual frame control — every frame rendered exactly once
+  noLoop();
   try {
     for (let f = 0; f < totalFrames; f++) {
-      if (!state.recordPhase) break; // cancelled
-      draw();
+      if (!state.recordPhase) break;
+      redraw();
       const frame = new VideoFrame(canvas, { timestamp: Math.round(f * 1_000_000 / CONFIG.FPS) });
       encoder.encode(frame, { keyFrame: f % 60 === 0 });
       frame.close();
       if (f % 30 === 0) {
         updateRecordProgress('VIDEO', f / totalFrames);
-        await new Promise(r => setTimeout(r, 0)); // yield so cancel can land
+        await new Promise(r => setTimeout(r, 0));
       }
     }
   } finally {
     loop();
     Tone.Destination.volume.value = 0;
+    CONFIG.PREVIEW_SCALE = prevScale;
+    resizeCanvas(CONFIG.NATIVE_W * prevScale, CONFIG.NATIVE_H * prevScale);
+    select('#canvas-container').style('visibility', 'visible');
   }
 
-  if (!state.recordPhase) { encoder.close(); return; } // cancelled
+  if (!state.recordPhase) { encoder.close(); return; }
 
   updateRecordProgress('VIDEO', 1);
   await encoder.flush();
@@ -1187,39 +1197,44 @@ async function doAudioPass() {
   barRecordFill.style('width', '60%');
   barRecordFill.style('background', '#40a060');
 
-  // Precompute exact trigger times from ball periods — matches video frame-by-frame
-  const noteDuration = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration;
-  const byTime = new Map();
-  const addNote = (t, note) => {
-    const key = t.toFixed(6);
-    if (!byTime.has(key)) byTime.set(key, { time: t, notes: [] });
-    byTime.get(key).notes.push(note);
-  };
-  for (const ball of balls) {
-    for (let k = 0; k * ball.period <= CONFIG.ORBIT_LOOP + 1e-9; k++) {
-      addNote(k * ball.period, ball.noteName);
+  noLoop(); // free browser resources for offline render — no frames needed
+  try {
+    // Precompute exact trigger times from ball periods — matches video frame-by-frame
+    const noteDuration = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration;
+    const byTime = new Map();
+    const addNote = (t, note) => {
+      const key = t.toFixed(6);
+      if (!byTime.has(key)) byTime.set(key, { time: t, notes: [] });
+      byTime.get(key).notes.push(note);
+    };
+    for (const ball of balls) {
+      for (let k = 0; k * ball.period <= CONFIG.ORBIT_LOOP + 1e-9; k++) {
+        addNote(k * ball.period, ball.noteName);
+      }
     }
+
+    const tailSec = Math.min(CONFIG.SPACE_WET > 0 ? CONFIG.SPACE_REVERB_DECAY * 3 : 0, 8);
+    const buffer = await Tone.Offline(async () => {
+      const offlineComp = new Tone.Compressor({ threshold: CONFIG.COMPRESSOR_THRESHOLD, ratio: CONFIG.COMPRESSOR_RATIO, attack: 0.003, release: 0.25 });
+      const offlineLim  = new Tone.Limiter(CONFIG.LIMITER_CEILING);
+      const offlineRev  = new Tone.Reverb({ decay: CONFIG.SPACE_REVERB_DECAY, wet: CONFIG.SPACE_WET });
+      offlineRev.connect(offlineComp);
+      offlineComp.connect(offlineLim);
+      offlineLim.toDestination();
+      const built = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].build();
+      built.output.connect(offlineRev);
+      await offlineRev.ready;
+      for (const { time, notes } of byTime.values()) {
+        built.poly.triggerAttackRelease(notes, noteDuration, time);
+      }
+    }, CONFIG.ORBIT_LOOP + tailSec);
+
+    if (!state.recordPhase) return; // cancelled — discard
+    downloadBlob(audioBufferToWav(buffer, CONFIG.ORBIT_LOOP), 'orbital_audio.wav');
+    state.recordPhase = null;
+  } finally {
+    loop(); // restore p5 rendering
   }
-
-  const tailSec = Math.min(CONFIG.SPACE_WET > 0 ? CONFIG.SPACE_REVERB_DECAY * 3 : 0, 8);
-  const buffer = await Tone.Offline(async () => {
-    const offlineComp = new Tone.Compressor({ threshold: CONFIG.COMPRESSOR_THRESHOLD, ratio: CONFIG.COMPRESSOR_RATIO, attack: 0.003, release: 0.25 });
-    const offlineLim  = new Tone.Limiter(CONFIG.LIMITER_CEILING);
-    const offlineRev  = new Tone.Reverb({ decay: CONFIG.SPACE_REVERB_DECAY, wet: CONFIG.SPACE_WET });
-    offlineRev.connect(offlineComp);
-    offlineComp.connect(offlineLim);
-    offlineLim.toDestination();
-    const built = SYNTH_PRESETS[CONFIG.SYNTH_PRESET].build();
-    built.output.connect(offlineRev);
-    await offlineRev.ready;
-    for (const { time, notes } of byTime.values()) {
-      built.poly.triggerAttackRelease(notes, noteDuration, time);
-    }
-  }, CONFIG.ORBIT_LOOP + tailSec);
-
-  if (!state.recordPhase) return; // cancelled — discard
-  downloadBlob(audioBufferToWav(buffer, CONFIG.ORBIT_LOOP), 'orbital_audio.wav');
-  state.recordPhase = null;
 }
 
 function audioBufferToWav(buffer, trimSecs) {
@@ -1249,7 +1264,7 @@ function cancelRecording() {
   loop(); // restore p5 loop in case we were in noLoop() during video pass
   divRecordProgress.style('display', 'none');
   lblRecordCmd.style('display', 'none');
-  btnRecord.html('Record');
+  btnRecord.html('Export');
   btnPlay.html('Play');
 }
 
@@ -1261,9 +1276,3 @@ function downloadBlob(blob, filename) {
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 10000);
 }
-
-// ─── TODOs ────────────────────────────────────────────────────────────────────
-
-// TODO: Full-res export
-//   CONFIG.PREVIEW_SCALE = 1.0 path (or separate EXPORT_SCALE config value)
-//   All drawing already scales — just change the multiplier
