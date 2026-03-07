@@ -34,7 +34,7 @@ const SYNTH_PRESETS = {
       const poly = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'sine' },
         envelope: { attack: 0.005, decay: 0.3, sustain: 0.0, release: 0.5 },
-        maxPolyphony: 128,
+        maxPolyphony: 256,
       });
       return { poly, output: poly, nodes: [] };
     },
@@ -48,7 +48,7 @@ const SYNTH_PRESETS = {
       const poly = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'triangle' },
         envelope: { attack: 0.001, decay: 2.5, sustain: 0.0, release: 2.0 },
-        maxPolyphony: 128,
+        maxPolyphony: 256,
       });
       const reverb = new Tone.Reverb({ decay: 5.0, wet: 0.45 });
       poly.connect(reverb);
@@ -66,7 +66,7 @@ const SYNTH_PRESETS = {
         modulationIndex: 14,
         envelope: { attack: 0.001, decay: 0.5, sustain: 0.0, release: 0.8 },
         modulationEnvelope: { attack: 0.002, decay: 0.4, sustain: 0.0, release: 0.5 },
-        maxPolyphony: 64,
+        maxPolyphony: 128,
       });
       return { poly, output: poly, nodes: [] };
     },
@@ -80,7 +80,7 @@ const SYNTH_PRESETS = {
       const poly = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'square' },
         envelope: { attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.4 },
-        maxPolyphony: 64,
+        maxPolyphony: 128,
       });
       const chorus = new Tone.Chorus({ frequency: 1.5, delayTime: 3.5, depth: 0.5, wet: 0.5 }).start();
       poly.connect(chorus);
@@ -99,7 +99,7 @@ const SYNTH_PRESETS = {
         envelope: { attack: 0.001, decay: 0.4, sustain: 0.0, release: 0.1 },
         modulation: { type: 'square' },
         modulationEnvelope: { attack: 0.002, decay: 0.3, sustain: 0.0, release: 0.1 },
-        maxPolyphony: 64,
+        maxPolyphony: 128,
       });
       return { poly, output: poly, nodes: [] };
     },
@@ -113,7 +113,7 @@ const SYNTH_PRESETS = {
       const poly = new Tone.PolySynth(Tone.Synth, {
         oscillator: { type: 'sine' },
         envelope: { attack: 0.1, decay: 1.0, sustain: 0.3, release: 3.0 },
-        maxPolyphony: 64,
+        maxPolyphony: 128,
       });
       const delay  = new Tone.PingPongDelay({ delayTime: '8n', feedback: 0.4, wet: 0.3 });
       const reverb = new Tone.Reverb({ decay: 8.0, wet: 0.6 });

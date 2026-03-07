@@ -609,7 +609,7 @@ function draw() {
   if (!state.recordPhase) drawHUD(S);
 
   // Persist settings every ~5 seconds
-  if (frameCount % 300 === 0) saveSettings();
+  if (frameCount % 300 === 0 && !state.recordPhase) saveSettings();
 
 }
 
@@ -917,9 +917,9 @@ function resetSim() {
 }
 
 function fireBigBang() {
+  state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
   const allNotes = balls.map(b => b.noteName);
   poly.triggerAttackRelease(allNotes, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
-  state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
 }
 
 // ─── Note range ───────────────────────────────────────────────────────────────
@@ -1143,6 +1143,14 @@ async function doVideoPass() {
   select('#canvas-container').style('visibility', 'hidden');
 
   const canvas = drawingContext.canvas; // now 1080×1920
+
+  // Intermediate CPU-readable canvas — Chrome GPU-accelerates large canvases and
+  // VideoEncoder can't read GPU textures directly ("Can't readback frame textures").
+  const readback = document.createElement('canvas');
+  readback.width = canvas.width;
+  readback.height = canvas.height;
+  const readbackCtx = readback.getContext('2d');
+
   const target = new ArrayBufferTarget();
   const muxer = new Muxer({
     target,
@@ -1150,9 +1158,10 @@ async function doVideoPass() {
     fastStart: 'in-memory',
   });
 
+  let encoderError = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: e => { throw e; },
+    error: e => { encoderError = e; },
   });
   encoder.configure({
     codec: 'avc1.640032',   // H.264 High profile, Level 5.0 — handles 1080×1920@60
@@ -1166,8 +1175,15 @@ async function doVideoPass() {
   try {
     for (let f = 0; f < totalFrames; f++) {
       if (!state.recordPhase) break;
+      if (encoderError) throw encoderError;
+      // Backpressure: let encoder drain before submitting more frames
+      while (encoder.encodeQueueSize > 10) {
+        await new Promise(r => setTimeout(r, 16));
+        if (encoderError) throw encoderError;
+      }
       redraw();
-      const frame = new VideoFrame(canvas, { timestamp: Math.round(f * 1_000_000 / CONFIG.FPS) });
+      readbackCtx.drawImage(canvas, 0, 0); // force GPU→CPU copy
+      const frame = new VideoFrame(readback, { timestamp: Math.round(f * 1_000_000 / CONFIG.FPS) });
       encoder.encode(frame, { keyFrame: f % 60 === 0 });
       frame.close();
       if (f % 30 === 0) {
@@ -1181,12 +1197,28 @@ async function doVideoPass() {
     CONFIG.PREVIEW_SCALE = prevScale;
     resizeCanvas(CONFIG.NATIVE_W * prevScale, CONFIG.NATIVE_H * prevScale);
     select('#canvas-container').style('visibility', 'visible');
+    saveSettings(); // persist restored scale immediately
   }
 
   if (!state.recordPhase) { encoder.close(); return; }
 
   updateRecordProgress('VIDEO', 1);
-  await encoder.flush();
+  noLoop(); // suppress p5 draw loop during CPU-intensive flush
+  try {
+    const initialQueue = encoder.encodeQueueSize;
+    const flushPromise = encoder.flush();
+    if (initialQueue > 0) {
+      while (encoder.encodeQueueSize > 0) {
+        if (encoderError) throw encoderError;
+        const frac = 1 - encoder.encodeQueueSize / initialQueue;
+        lblRecordStatus.html(`VIDEO — encoding ${Math.round(frac * 100)}%`);
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    await flushPromise;
+  } finally {
+    loop();
+  }
   encoder.close();
   muxer.finalize();
   downloadBlob(new Blob([target.buffer], { type: 'video/mp4' }), 'orbital_video.mp4');
