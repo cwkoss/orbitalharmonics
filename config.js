@@ -105,6 +105,55 @@ const SYNTH_PRESETS = {
     },
   },
 
+  nes_pulse: {
+    label: 'NES Pulse',
+    noteDuration: '8n',
+    // 25% duty-cycle pulse — the nasal, reedy NES lead channel tone
+    build() {
+      const poly = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'pulse', width: 0.25 },
+        envelope: { attack: 0.001, decay: 0.12, sustain: 0.75, release: 0.08 },
+        maxPolyphony: 256,
+      });
+      return { poly, output: poly, nodes: [] };
+    },
+  },
+
+  snes_echo: {
+    label: 'SNES Echo',
+    noteDuration: '8n',
+    // Square wave + feedback delay — characteristic SNES echo effect (Chrono Trigger, Secret of Mana)
+    build() {
+      const poly = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'square' },
+        envelope: { attack: 0.003, decay: 0.1, sustain: 0.65, release: 0.12 },
+        maxPolyphony: 128,
+      });
+      const delay = new Tone.FeedbackDelay({ delayTime: '8n', feedback: 0.38, wet: 0.42 });
+      poly.connect(delay);
+      return { poly, output: delay, nodes: [delay] };
+    },
+  },
+
+  gameboy: {
+    label: 'Game Boy',
+    noteDuration: '16n',
+    // Square wave through a WaveShaper that quantizes to 4-bit steps — lo-fi DMG crunch.
+    // Uses WaveShaper instead of BitCrusher because BitCrusher requires an AudioWorklet
+    // which fails under file:// (blob:null/ URLs are blocked).
+    build() {
+      const poly = new Tone.PolySynth(Tone.Synth, {
+        oscillator: { type: 'square' },
+        envelope: { attack: 0.001, decay: 0.06, sustain: 0.8, release: 0.05 },
+        maxPolyphony: 256,
+      });
+      const steps = Math.pow(2, 3); // 4-bit: 8 steps per half-range → 16 levels total
+      const crusher = new Tone.WaveShaper(x => Math.round(x * steps) / steps, 256);
+      poly.connect(crusher);
+      return { poly, output: crusher, nodes: [crusher] };
+    },
+  },
+
   cosmic_pad: {
     label: 'Cosmic Pad',
     noteDuration: '2n',
@@ -150,11 +199,8 @@ const CONFIG = {
   TRAIL_DECAY: 0.9,      // alpha multiplier per frame
 
   // Trigger line
-  TRIGGER_LINE_ALPHA_IDLE: 0.4,
-  TRIGGER_LINE_ALPHA_PULSE: 1.0,
-  TRIGGER_LINE_WIDTH_IDLE: 2,
-  TRIGGER_LINE_WIDTH_PULSE: 4,
-  TRIGGER_PULSE_FRAMES: 3,
+  TRIGGER_LINE_ALPHA: 0.4,
+  TRIGGER_LINE_WIDTH: 2,
 
   // Physics
   FPS: 60,
@@ -172,7 +218,7 @@ const CONFIG = {
   LIMITER_CEILING: -1,
 
   // Trigger line flash
-  TRIGGER_FLASH: false,
+  TRIGGER_BRIGHT: true,
 
   // Alternating direction mode
   ALT_DIRECTION: false,

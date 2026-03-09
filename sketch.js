@@ -8,15 +8,14 @@ let currentSynthNodes = [];
 let state = {
   playing: false,
   simFrame: 0,
-  triggerPulseFrames: 0,
   audioReady: false,
   recordPhase: null,       // null | 'video' | 'audio'
 };
 
 // p5.dom UI elements
 let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
-let btnAltDir, btnSonar, btnGlow, btnFlash, btnFling, btnPeriodTrail, inpTrailLen, inpBallSize;
-let selColorMode, btnConstellation, inpConstellationThresh;
+let btnAltDir, btnSonar, btnGlow, btnFling, btnPeriodTrail, inpTrailLen, inpBallSize;
+let selColorMode, btnTriggerBright, btnConstellation, inpConstellationThresh;
 let btnGravity, inpGravityX, inpGravityY, inpGravityStrength, divGravityControls;
 let btnAfterglow, inpAfterglowFade, divAfterglowControls;
 let inpSpace;
@@ -34,19 +33,28 @@ const TWO_PI = Math.PI * 2;
 const SETTINGS_KEY = 'orbital_config';
 
 function saveSettings() {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(CONFIG)); } catch (e) {}
+  try {
+    const { PREVIEW_SCALE, NATIVE_W, NATIVE_H, ...toSave } = CONFIG; // never persist render constants
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(toSave));
+  } catch (e) {}
 }
 
 function loadSettings() {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    if (raw) Object.assign(CONFIG, JSON.parse(raw));
+    if (raw) {
+      const saved = JSON.parse(raw);
+      delete saved.PREVIEW_SCALE; // scrub any stale value from old exports
+      delete saved.NATIVE_W;
+      delete saved.NATIVE_H;
+      Object.assign(CONFIG, saved);
+    }
   } catch (e) {}
 }
 
 function syncToggleButtons() {
   setToggleActive(btnAltDir,        CONFIG.ALT_DIRECTION);
-  setToggleActive(btnFlash,         CONFIG.TRIGGER_FLASH);
+  setToggleActive(btnTriggerBright, CONFIG.TRIGGER_BRIGHT);
   setToggleActive(btnSonar,         CONFIG.SONAR_ENABLED);
   setToggleActive(btnGlow,          CONFIG.GLOW_ENABLED);
   setToggleActive(btnFling,         CONFIG.TRAIL_FLING);
@@ -371,13 +379,14 @@ function buildUI() {
   selColorMode = createSelect(); styleSelect(selColorMode);
   selColorMode.option('Index',    'index');
   selColorMode.option('Velocity', 'velocity');
-  selColorMode.option('Trigger',  'trigger');
   selColorMode.option('Harmonic', 'harmonic');
+  if (CONFIG.COLOR_MODE === 'trigger') CONFIG.COLOR_MODE = 'index'; // migrate old saved value
   selColorMode.selected(CONFIG.COLOR_MODE); selColorMode.changed(onColorModeChange);
   addLabeledFull('Color Mode', selColorMode, visBody);
 
-  btnFlash = createButton('Off'); styleBtn(btnFlash); btnFlash.mousePressed(onFlashToggle);
-  addToggleRow('Flash', btnFlash, visBody);
+  btnTriggerBright = createButton('Off'); styleBtn(btnTriggerBright); btnTriggerBright.mousePressed(onTriggerBrightToggle);
+  addToggleRow('Trigger Bright', btnTriggerBright, visBody);
+
 
   btnSonar = createButton('Off'); styleBtn(btnSonar); btnSonar.mousePressed(onSonarToggle);
   addToggleRow('Sonar', btnSonar, visBody);
@@ -623,7 +632,6 @@ function updateBalls() {
     checkTrigger(ball);
     pushTrail(ball);
   }
-  if (state.triggerPulseFrames > 0) state.triggerPulseFrames--;
 }
 
 function checkTrigger(ball) {
@@ -636,7 +644,6 @@ function checkTrigger(ball) {
   if (crossed && debounceOk && state.audioReady) {
     poly.triggerAttackRelease(ball.noteName, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
     ball.lastTriggerFrame = state.simFrame;
-    state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
     if (CONFIG.SONAR_ENABLED) {
       sonarRings.push({
         x: CONFIG.NATIVE_W / 2,
@@ -681,30 +688,30 @@ function advanceTrails(ball) {
 function getBallDisplayColor(ball) {
   // Returns [hue, sat, lit] without mutating ball.hue
   const mode = CONFIG.COLOR_MODE;
+  let hsl;
 
   if (mode === 'velocity') {
     const maxOmega = Math.abs(balls[0].omega);
     const minOmega = Math.abs(balls[balls.length - 1].omega);
     const t = (Math.abs(ball.omega) - minOmega) / (maxOmega - minOmega || 1);
-    return [240 * (1 - t), 90, 80]; // fast=red, slow=blue
-  }
-
-  if (mode === 'trigger') {
-    const age = state.simFrame - ball.lastTriggerFrame;
-    const t = Math.max(0, 1 - age / CONFIG.TRIGGER_COOL_FRAMES);
-    return [ball.hue, 60 + 30 * t, 50 + 45 * t]; // spikes bright on trigger, cools to dim
-  }
-
-  if (mode === 'harmonic') {
+    hsl = [240 * (1 - t), 90, 80]; // fast=red, slow=blue
+  } else if (mode === 'harmonic') {
     const ratio = ball.period / balls[0].period;
     const nearInt = Math.round(ratio);
-    if (Math.abs(ratio - nearInt) < 0.05) {
-      return [(nearInt * 137.508) % 360, 85, 72]; // golden-angle hue per integer ratio
-    }
-    return [0, 0, 35]; // non-harmonic → grey
+    hsl = Math.abs(ratio - nearInt) < 0.05
+      ? [(nearInt * 137.508) % 360, 85, 72] // golden-angle hue per integer ratio
+      : [0, 0, 35]; // non-harmonic → grey
+  } else {
+    hsl = [ball.hue, 90, 80]; // 'index' (default)
   }
 
-  return [ball.hue, 90, 80]; // 'index' (default)
+  // Trigger bright: boost lightness + saturation on crossing, independent of color mode
+  if (CONFIG.TRIGGER_BRIGHT) {
+    const t = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
+    hsl = [hsl[0], Math.min(100, hsl[1] + 10 * t), Math.min(100, hsl[2] + 20 * t)];
+  }
+
+  return hsl;
 }
 
 function gravityDisplace(nx, ny) {
@@ -725,9 +732,8 @@ function gravityDisplace(nx, ny) {
 function drawTriggerLine(S) {
   const CX = CONFIG.NATIVE_W / 2 * S;
   const CY = CONFIG.NATIVE_H / 2 * S;
-  const isPulse = CONFIG.TRIGGER_FLASH && state.triggerPulseFrames > 0;
-  const alpha = isPulse ? CONFIG.TRIGGER_LINE_ALPHA_PULSE : CONFIG.TRIGGER_LINE_ALPHA_IDLE;
-  const lw    = isPulse ? CONFIG.TRIGGER_LINE_WIDTH_PULSE  : CONFIG.TRIGGER_LINE_WIDTH_IDLE;
+  const alpha = CONFIG.TRIGGER_LINE_ALPHA;
+  const lw    = CONFIG.TRIGGER_LINE_WIDTH;
 
   stroke(0, 0, 100, alpha);
   strokeWeight(lw * S);
@@ -904,7 +910,6 @@ async function togglePlay() {
 
 function resetSim() {
   state.simFrame = 0;
-  state.triggerPulseFrames = 0;
   for (const ball of balls) {
     ball.theta = 0;
     ball.prevTheta = 0;
@@ -917,7 +922,6 @@ function resetSim() {
 }
 
 function fireBigBang() {
-  state.triggerPulseFrames = CONFIG.TRIGGER_PULSE_FRAMES;
   const allNotes = balls.map(b => b.noteName);
   poly.triggerAttackRelease(allNotes, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
 }
@@ -1013,11 +1017,6 @@ function setToggleActive(btn, active) {
   btn.style('color', active ? '#fff' : '#aaa');
 }
 
-function onFlashToggle() {
-  CONFIG.TRIGGER_FLASH = !CONFIG.TRIGGER_FLASH;
-  setToggleActive(btnFlash, CONFIG.TRIGGER_FLASH);
-}
-
 function onAltDirToggle() {
   CONFIG.ALT_DIRECTION = !CONFIG.ALT_DIRECTION;
   setToggleActive(btnAltDir, CONFIG.ALT_DIRECTION);
@@ -1054,6 +1053,11 @@ function onPeriodTrailToggle() {
 
 function onColorModeChange() {
   CONFIG.COLOR_MODE = selColorMode.value();
+}
+
+function onTriggerBrightToggle() {
+  CONFIG.TRIGGER_BRIGHT = !CONFIG.TRIGGER_BRIGHT;
+  setToggleActive(btnTriggerBright, CONFIG.TRIGGER_BRIGHT);
 }
 
 function onSpaceChange() {
@@ -1197,7 +1201,6 @@ async function doVideoPass() {
     CONFIG.PREVIEW_SCALE = prevScale;
     resizeCanvas(CONFIG.NATIVE_W * prevScale, CONFIG.NATIVE_H * prevScale);
     select('#canvas-container').style('visibility', 'visible');
-    saveSettings(); // persist restored scale immediately
   }
 
   if (!state.recordPhase) { encoder.close(); return; }
