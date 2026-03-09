@@ -10,6 +10,7 @@ let state = {
   simFrame: 0,
   audioReady: false,
   recordPhase: null,       // null | 'video' | 'audio'
+  clearCanvas: false,      // force full background clear on next draw (e.g. after reset)
 };
 
 // p5.dom UI elements
@@ -247,6 +248,7 @@ function initBalls() {
       hue:              hue,
       trailPos:         [],
       lastTriggerFrame: -9999,
+      strobeFlipped:    false,
     });
   }
   if (lblLoNote) syncNoteRangeUI(); // update range display after balls are built
@@ -612,11 +614,12 @@ function updateModeButtons() {
 
 function draw() {
   const S = CONFIG.PREVIEW_SCALE;
-  if (CONFIG.AFTERGLOW_ENABLED && state.playing) {
+  if (CONFIG.AFTERGLOW_ENABLED && state.playing && !state.clearCanvas) {
     noStroke(); fill(0, 0, 5, CONFIG.AFTERGLOW_FADE);
     rect(0, 0, width, height);
   } else {
     background(0, 0, 5);
+    state.clearCanvas = false;
   }
 
   if (state.playing) {
@@ -660,6 +663,7 @@ function checkTrigger(ball) {
   if (crossed && debounceOk && state.audioReady) {
     poly.triggerAttackRelease(ball.noteName, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
     ball.lastTriggerFrame = state.simFrame;
+    if (CONFIG.STROBE_ENABLED) ball.strobeFlipped = !ball.strobeFlipped;
     if (CONFIG.SONAR_ENABLED) {
       sonarRings.push({
         x: CONFIG.NATIVE_W / 2,
@@ -776,10 +780,9 @@ function getBallDisplayColor(ball, triggerOverlays = true) {
   }
 
   if (triggerOverlays) {
-    // Strobe: hue flips to complement on trigger, decays back over TRIGGER_COOL_FRAMES
-    if (CONFIG.STROBE_ENABLED) {
-      const st = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
-      hsl = [(hsl[0] + 180 * st) % 360, hsl[1], hsl[2]];
+    // Strobe: permanently flip hue 180° each crossing, persists until next crossing
+    if (CONFIG.STROBE_ENABLED && ball.strobeFlipped) {
+      hsl = [(hsl[0] + 180) % 360, hsl[1], hsl[2]];
     }
     // Trigger bright: boost lightness + saturation on crossing
     if (CONFIG.TRIGGER_BRIGHT) {
@@ -914,7 +917,7 @@ function drawGravityWell(S) {
 }
 
 function drawHUD(S) {
-  const elapsed = state.simFrame / CONFIG.FPS;
+  const elapsed = Math.max(0, state.simFrame) / CONFIG.FPS;
   const mins = Math.floor(elapsed / 60);
   const secs = (elapsed % 60).toFixed(1).padStart(4, '0');
   const timeStr = `${mins}:${secs}`;
@@ -979,28 +982,22 @@ async function togglePlay() {
     initAudio();
     await Tone.start();
     state.audioReady = true;
-    fireBigBang();
   }
   state.playing = !state.playing;
   btnPlay.html(state.playing ? 'Pause' : 'Play');
 }
 
 function resetSim() {
-  state.simFrame = 0;
+  state.simFrame = -2;
+  state.clearCanvas = true;
   for (const ball of balls) {
-    ball.theta = 0;
-    ball.prevTheta = 0;
+    // Start 2 frames before the big bang so balls approach the trigger visibly
+    ball.theta    = ((-2 * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+    ball.prevTheta = ball.theta;
     ball.trailPos = [];
     ball.lastTriggerFrame = -9999;
+    ball.strobeFlipped = false;
   }
-  if (state.audioReady) {
-    fireBigBang();
-  }
-}
-
-function fireBigBang() {
-  const allNotes = balls.map(b => b.noteName);
-  poly.triggerAttackRelease(allNotes, SYNTH_PRESETS[CONFIG.SYNTH_PRESET].noteDuration);
 }
 
 // ─── Note range ───────────────────────────────────────────────────────────────
@@ -1264,6 +1261,32 @@ async function doVideoPass() {
 
   noLoop();
   try {
+    // Afterglow warm-up: render one silent cycle to pre-build the persistent canvas
+    // state so the recorded loop starts and ends with matching afterglow.
+    if (CONFIG.AFTERGLOW_ENABLED) {
+      for (let f = 0; f < totalFrames; f++) {
+        if (!state.recordPhase) break;
+        redraw();
+        if (f % 30 === 0) {
+          lblRecordStatus.html(`VIDEO — warming up ${Math.round(f / totalFrames * 100)}%`);
+          await new Promise(r => setTimeout(r, 0));
+        }
+      }
+      if (state.recordPhase) {
+        // Reset sim state back to the recording start position, but leave the
+        // canvas untouched so the built-up afterglow carries into the recording.
+        state.simFrame = -2;
+        sonarRings = [];
+        for (const ball of balls) {
+          ball.theta         = ((-2 * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+          ball.prevTheta     = ball.theta;
+          ball.trailPos      = [];
+          ball.lastTriggerFrame = -9999;
+          ball.strobeFlipped = false;
+        }
+      }
+    }
+
     for (let f = 0; f < totalFrames; f++) {
       if (!state.recordPhase) break;
       if (encoderError) throw encoderError;
@@ -1331,7 +1354,7 @@ async function doAudioPass() {
       byTime.get(key).notes.push(note);
     };
     for (const ball of balls) {
-      for (let k = 0; k * ball.period <= CONFIG.ORBIT_LOOP + 1e-9; k++) {
+      for (let k = 0; k * ball.period < CONFIG.ORBIT_LOOP; k++) {
         addNote(k * ball.period, ball.noteName);
       }
     }
