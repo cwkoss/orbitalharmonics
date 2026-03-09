@@ -15,7 +15,7 @@ let state = {
 // p5.dom UI elements
 let btnPlay, btnReset, btnRecord, selScale, selPreset, selToneDir, selSynth;
 let btnAltDir, btnSonar, btnGlow, btnFling, btnPeriodTrail, inpTrailLen, inpBallSize;
-let selColorMode, btnTriggerBright, btnConstellation, inpConstellationThresh;
+let selColorMode, btnTriggerBright, btnRipple, btnStrobe, btnConstellation, inpConstellationThresh;
 let btnGravity, inpGravityX, inpGravityY, inpGravityStrength, divGravityControls;
 let btnAfterglow, inpAfterglowFade, divAfterglowControls;
 let inpSpace;
@@ -55,6 +55,8 @@ function loadSettings() {
 function syncToggleButtons() {
   setToggleActive(btnAltDir,        CONFIG.ALT_DIRECTION);
   setToggleActive(btnTriggerBright, CONFIG.TRIGGER_BRIGHT);
+  setToggleActive(btnRipple,        CONFIG.RIPPLE_ENABLED);
+  setToggleActive(btnStrobe,        CONFIG.STROBE_ENABLED);
   setToggleActive(btnSonar,         CONFIG.SONAR_ENABLED);
   setToggleActive(btnGlow,          CONFIG.GLOW_ENABLED);
   setToggleActive(btnFling,         CONFIG.TRAIL_FLING);
@@ -378,14 +380,28 @@ function buildUI() {
 
   selColorMode = createSelect(); styleSelect(selColorMode);
   selColorMode.option('Index',    'index');
-  selColorMode.option('Velocity', 'velocity');
+  selColorMode.option('Inverse',  'inverse');
+  selColorMode.option('Cycle',    'cycle');
+  selColorMode.option('Sunset',   'sunset');
+  selColorMode.option('Candy',    'candy');
+  selColorMode.option('Plasma',   'plasma');
+  selColorMode.option('Zebra',    'zebra');
+  selColorMode.option('Galaxy',   'galaxy');
+  selColorMode.option('Phase',    'phase');
+  selColorMode.option('Aurora',   'aurora');
   selColorMode.option('Harmonic', 'harmonic');
-  if (CONFIG.COLOR_MODE === 'trigger') CONFIG.COLOR_MODE = 'index'; // migrate old saved value
+  if (CONFIG.COLOR_MODE === 'trigger' || CONFIG.COLOR_MODE === 'velocity') CONFIG.COLOR_MODE = 'index'; // migrate old saved values
   selColorMode.selected(CONFIG.COLOR_MODE); selColorMode.changed(onColorModeChange);
   addLabeledFull('Color Mode', selColorMode, visBody);
 
   btnTriggerBright = createButton('Off'); styleBtn(btnTriggerBright); btnTriggerBright.mousePressed(onTriggerBrightToggle);
   addToggleRow('Trigger Bright', btnTriggerBright, visBody);
+
+  btnRipple = createButton('Off'); styleBtn(btnRipple); btnRipple.mousePressed(onRippleToggle);
+  addToggleRow('Ripple', btnRipple, visBody);
+
+  btnStrobe = createButton('Off'); styleBtn(btnStrobe); btnStrobe.mousePressed(onStrobeToggle);
+  addToggleRow('Strobe', btnStrobe, visBody);
 
 
   btnSonar = createButton('Off'); styleBtn(btnSonar); btnSonar.mousePressed(onSonarToggle);
@@ -686,29 +702,89 @@ function advanceTrails(ball) {
 // ─── Color / display helpers ─────────────────────────────────────────────────
 
 function getBallDisplayColor(ball) {
-  // Returns [hue, sat, lit] without mutating ball.hue
   const mode = CONFIG.COLOR_MODE;
+  const t = ball.index / Math.max(1, balls.length - 1); // 0=innermost, 1=outermost
   let hsl;
 
-  if (mode === 'velocity') {
-    const maxOmega = Math.abs(balls[0].omega);
-    const minOmega = Math.abs(balls[balls.length - 1].omega);
-    const t = (Math.abs(ball.omega) - minOmega) / (maxOmega - minOmega || 1);
-    hsl = [240 * (1 - t), 90, 80]; // fast=red, slow=blue
-  } else if (mode === 'harmonic') {
-    const ratio = ball.period / balls[0].period;
-    const nearInt = Math.round(ratio);
-    hsl = Math.abs(ratio - nearInt) < 0.05
-      ? [(nearInt * 137.508) % 360, 85, 72] // golden-angle hue per integer ratio
-      : [0, 0, 35]; // non-harmonic → grey
-  } else {
-    hsl = [ball.hue, 90, 80]; // 'index' (default)
+  switch (mode) {
+    case 'inverse':
+      hsl = [240 - ball.hue, 90, 80]; // blue inner → red outer
+      break;
+    case 'cycle':
+      hsl = [(ball.hue * 4) % 360, 90, 80]; // 4 full red→blue cycles across the set
+      break;
+    case 'sunset': {
+      // yellow-white (inner) → orange → red → deep purple (outer)
+      const hue = (60 - t * 120 + 360) % 360;
+      hsl = [hue, 90, 90 - 50 * t];
+      break;
+    }
+    case 'candy':
+      hsl = [360 * t, 85, 85]; // full 360° rainbow, bright pastels
+      break;
+    case 'plasma': {
+      // magenta (inner) → white (mid) → cyan (outer)
+      const hue = 300 - t * 120;
+      const sat = Math.pow(Math.abs(t * 2 - 1), 0.6) * 85;
+      const lit = 50 + (1 - Math.abs(t * 2 - 1)) * 45;
+      hsl = [hue, sat, lit];
+      break;
+    }
+    case 'zebra': {
+      // adjacent balls are complementary — dense alternating texture
+      const hue = (ball.hue + (ball.index % 2) * 180) % 360;
+      hsl = [hue, 90, 80];
+      break;
+    }
+    case 'galaxy': {
+      // blue-white (hot inner stars) → amber-red (cool outer giants)
+      const hue = 225 * Math.pow(1 - t, 1.2);
+      const sat = 20 + 80 * t;
+      const lit = 90 - 50 * t;
+      hsl = [hue, sat, lit];
+      break;
+    }
+    case 'phase': {
+      // hue = current orbital angle — animates as balls orbit
+      hsl = [(ball.theta / TWO_PI * 360 + 360) % 360, 90, 80];
+      break;
+    }
+    case 'aurora': {
+      // slow sine wave of teal/green/blue hues drifting across the index axis
+      const hue = 160 + 40 * Math.sin(state.simFrame * 0.008 + t * Math.PI * 3);
+      const sat = 75 + 20 * Math.sin(state.simFrame * 0.011 + t * Math.PI * 2);
+      const lit = 65 + 15 * Math.cos(state.simFrame * 0.006 + t * Math.PI * 4);
+      hsl = [hue, sat, lit];
+      break;
+    }
+    case 'harmonic': {
+      const ratio = ball.period / balls[0].period;
+      const nearInt = Math.round(ratio);
+      hsl = Math.abs(ratio - nearInt) < 0.05
+        ? [(nearInt * 137.508) % 360, 85, 72]
+        : [0, 0, 35];
+      break;
+    }
+    default: // 'index'
+      hsl = [ball.hue, 90, 80];
   }
 
-  // Trigger bright: boost lightness + saturation on crossing, independent of color mode
+  // Ripple: animated rainbow wave flowing outward from center
+  if (CONFIG.RIPPLE_ENABLED) {
+    const offset = (t * 360 - state.simFrame * 0.8 + 3600) % 360;
+    hsl = [(hsl[0] + offset) % 360, hsl[1], hsl[2]];
+  }
+
+  // Strobe: hue flips to complement on trigger, decays back over TRIGGER_COOL_FRAMES
+  if (CONFIG.STROBE_ENABLED) {
+    const st = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
+    hsl = [(hsl[0] + 180 * st) % 360, hsl[1], hsl[2]];
+  }
+
+  // Trigger bright: boost lightness + saturation on crossing
   if (CONFIG.TRIGGER_BRIGHT) {
-    const t = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
-    hsl = [hsl[0], Math.min(100, hsl[1] + 10 * t), Math.min(100, hsl[2] + 20 * t)];
+    const bt = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
+    hsl = [hsl[0], Math.min(100, hsl[1] + 10 * bt), Math.min(100, hsl[2] + 20 * bt)];
   }
 
   return hsl;
@@ -1058,6 +1134,16 @@ function onColorModeChange() {
 function onTriggerBrightToggle() {
   CONFIG.TRIGGER_BRIGHT = !CONFIG.TRIGGER_BRIGHT;
   setToggleActive(btnTriggerBright, CONFIG.TRIGGER_BRIGHT);
+}
+
+function onRippleToggle() {
+  CONFIG.RIPPLE_ENABLED = !CONFIG.RIPPLE_ENABLED;
+  setToggleActive(btnRipple, CONFIG.RIPPLE_ENABLED);
+}
+
+function onStrobeToggle() {
+  CONFIG.STROBE_ENABLED = !CONFIG.STROBE_ENABLED;
+  setToggleActive(btnStrobe, CONFIG.STROBE_ENABLED);
 }
 
 function onSpaceChange() {

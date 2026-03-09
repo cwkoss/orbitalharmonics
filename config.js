@@ -219,6 +219,8 @@ const CONFIG = {
 
   // Trigger line flash
   TRIGGER_BRIGHT: true,
+  RIPPLE_ENABLED: false,
+  STROBE_ENABLED: false,
 
   // Alternating direction mode
   ALT_DIRECTION: false,
