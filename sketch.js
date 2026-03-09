@@ -23,7 +23,7 @@ let btnModeH, btnModeP, btnModeF, inpBalls, inpLoop;
 let inpCenterNote, lblLoNote, lblHiNote;
 let divRecordProgress, barRecordFill, lblRecordStatus, lblRecordCmd;
 
-let sonarRings = []; // { x, y, r, age, hue } all in native px
+let sonarRings = []; // { x, y, r, age, hsl } all in native px
 
 // Derived scale constants (set in initBalls)
 const TWO_PI = Math.PI * 2;
@@ -666,7 +666,7 @@ function checkTrigger(ball) {
         y: CONFIG.NATIVE_H / 2 - ball.radius,
         r: CONFIG.BALL_SIZE_PX / 2,
         age: 0,
-        hue: ball.hue,
+        hsl: getBallDisplayColor(ball, false),
       });
     }
   }
@@ -701,7 +701,7 @@ function advanceTrails(ball) {
 
 // ─── Color / display helpers ─────────────────────────────────────────────────
 
-function getBallDisplayColor(ball) {
+function getBallDisplayColor(ball, triggerOverlays = true) {
   const mode = CONFIG.COLOR_MODE;
   const t = ball.index / Math.max(1, balls.length - 1); // 0=innermost, 1=outermost
   let hsl;
@@ -775,16 +775,17 @@ function getBallDisplayColor(ball) {
     hsl = [(hsl[0] + offset) % 360, hsl[1], hsl[2]];
   }
 
-  // Strobe: hue flips to complement on trigger, decays back over TRIGGER_COOL_FRAMES
-  if (CONFIG.STROBE_ENABLED) {
-    const st = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
-    hsl = [(hsl[0] + 180 * st) % 360, hsl[1], hsl[2]];
-  }
-
-  // Trigger bright: boost lightness + saturation on crossing
-  if (CONFIG.TRIGGER_BRIGHT) {
-    const bt = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
-    hsl = [hsl[0], Math.min(100, hsl[1] + 10 * bt), Math.min(100, hsl[2] + 20 * bt)];
+  if (triggerOverlays) {
+    // Strobe: hue flips to complement on trigger, decays back over TRIGGER_COOL_FRAMES
+    if (CONFIG.STROBE_ENABLED) {
+      const st = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
+      hsl = [(hsl[0] + 180 * st) % 360, hsl[1], hsl[2]];
+    }
+    // Trigger bright: boost lightness + saturation on crossing
+    if (CONFIG.TRIGGER_BRIGHT) {
+      const bt = Math.max(0, 1 - (state.simFrame - ball.lastTriggerFrame) / CONFIG.TRIGGER_COOL_FRAMES);
+      hsl = [hsl[0], Math.min(100, hsl[1] + 10 * bt), Math.min(100, hsl[2] + 20 * bt)];
+    }
   }
 
   return hsl;
@@ -952,7 +953,7 @@ function drawSonarRings(S) {
   noFill();
   for (const ring of sonarRings) {
     const alpha = 1 - ring.age / CONFIG.SONAR_MAX_AGE;
-    stroke(ring.hue, 80, 70, alpha);
+    stroke(ring.hsl[0], ring.hsl[1], ring.hsl[2], alpha);
     strokeWeight(CONFIG.SONAR_RING_WIDTH * S);
     circle(ring.x * S, ring.y * S, ring.r * 2 * S);
   }
