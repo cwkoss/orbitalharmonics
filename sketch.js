@@ -10,6 +10,7 @@ let state = {
   simFrame: 0,
   audioReady: false,
   recordPhase: null,       // null | 'video' | 'audio'
+  recordTotalFrames: 0,    // total frames expected for current record pass (used for progress %)
   clearCanvas: false,      // force full background clear on next draw (e.g. after reset)
 };
 
@@ -28,6 +29,13 @@ let sonarRings = []; // { x, y, r, age, hsl } all in native px
 
 // Derived scale constants (set in initBalls)
 const TWO_PI = Math.PI * 2;
+
+// ─── Named constants ──────────────────────────────────────────────────────────
+const PRE_FRAMES      = 2;      // frames before t=0 that resetSim starts at (balls approach trigger)
+const NEVER_TRIGGERED = -9999;  // sentinel: ball has never crossed the trigger line
+const YIELD_INTERVAL  = 30;     // frames between browser yields in render loops (warm-up + encode)
+const NCX = CONFIG.NATIVE_W / 2; // native center X — fixed for 1080×1920
+const NCY = CONFIG.NATIVE_H / 2; // native center Y — fixed for 1080×1920
 
 // ─── Settings persistence ─────────────────────────────────────────────────────
 
@@ -247,7 +255,7 @@ function initBalls() {
       noteName:         noteName,
       hue:              hue,
       trailPos:         [],
-      lastTriggerFrame: -9999,
+      lastTriggerFrame: NEVER_TRIGGERED,
       strobeFlipped:    false,
     });
   }
@@ -275,8 +283,21 @@ function setup() {
 
 function buildUI() {
   const panel = select('#panel');
+  buildControlsSection(panel);
+  buildOrbitsSection(panel);
+  buildMusicSection(panel);
+  buildEffectsSection(panel);
 
-  // ── CONTROLS ────────────────────────────────────────────────────────────────
+  // ── RESTORE DEFAULTS ─────────────────────────────────────────────────────────
+  const resetWrap = createDiv(''); resetWrap.parent(panel);
+  resetWrap.style('padding', '14px');
+  const btnDefaults = createButton('Restore Defaults'); styleBtn(btnDefaults);
+  btnDefaults.style('width', '100%'); btnDefaults.style('color', '#888');
+  btnDefaults.parent(resetWrap);
+  btnDefaults.mousePressed(() => { localStorage.removeItem(SETTINGS_KEY); location.reload(); });
+}
+
+function buildControlsSection(panel) {
   const ctrlBody = makeSection('Controls', panel);
 
   const ctrlBtns = makeRow(ctrlBody);
@@ -286,7 +307,7 @@ function buildUI() {
   btnRecord = createButton('Export'); styleBtn(btnRecord); btnRecord.mousePressed(onRecordClick);
   btnRecord.style('width', '100%'); btnRecord.parent(ctrlBody);
 
-  // Recording progress bar (hidden until recording)
+  // Recording progress bar (hidden until recording starts)
   divRecordProgress = createDiv(''); divRecordProgress.parent(ctrlBody);
   divRecordProgress.style('display', 'none'); divRecordProgress.style('margin-top', '4px');
   lblRecordStatus = createDiv(''); lblRecordStatus.parent(divRecordProgress);
@@ -303,8 +324,9 @@ function buildUI() {
   lblRecordCmd.style('display', 'none'); lblRecordCmd.style('margin-top', '5px');
   lblRecordCmd.style('color', '#8f8'); lblRecordCmd.style('font-size', '9px');
   lblRecordCmd.style('word-break', 'break-all'); lblRecordCmd.style('user-select', 'all');
+}
 
-  // ── ORBITS ──────────────────────────────────────────────────────────────────
+function buildOrbitsSection(panel) {
   const orbBody = makeSection('Orbits', panel);
 
   selPreset = createSelect(); styleSelect(selPreset);
@@ -332,8 +354,9 @@ function buildUI() {
 
   btnAltDir = createButton('Off'); styleBtn(btnAltDir); btnAltDir.mousePressed(onAltDirToggle);
   addToggleRow('Alt Dir', btnAltDir, orbBody);
+}
 
-  // ── AUDIO ────────────────────────────────────────────────────────────────────
+function buildMusicSection(panel) {
   const audioBody = makeSection('Audio', panel);
 
   selScale = createSelect(); styleSelect(selScale);
@@ -376,8 +399,9 @@ function buildUI() {
   makePanelLabel('Highest').parent(hiWrap);
   lblHiNote = createSpan('—'); lblHiNote.parent(hiWrap);
   lblHiNote.style('font-family', 'monospace'); lblHiNote.style('font-size', '12px');
+}
 
-  // ── VISUAL ───────────────────────────────────────────────────────────────────
+function buildEffectsSection(panel) {
   const visBody = makeSection('Visual', panel);
 
   selColorMode = createSelect(); styleSelect(selColorMode);
@@ -404,7 +428,6 @@ function buildUI() {
 
   btnStrobe = createButton('Off'); styleBtn(btnStrobe); btnStrobe.mousePressed(onStrobeToggle);
   addToggleRow('Strobe', btnStrobe, visBody);
-
 
   btnSonar = createButton('Off'); styleBtn(btnSonar); btnSonar.mousePressed(onSonarToggle);
   addToggleRow('Sonar', btnSonar, visBody);
@@ -475,14 +498,6 @@ function buildUI() {
   inpGravityStrength.value(CONFIG.GRAVITY_STRENGTH); inpGravityStrength.style('width', '100%'); inpGravityStrength.style('cursor', 'pointer');
   inpGravityStrength.input(() => { CONFIG.GRAVITY_STRENGTH = parseFloat(inpGravityStrength.value()); });
   addLabeledFull('Well Strength', inpGravityStrength, divGravityControls);
-
-  // ── RESTORE DEFAULTS ─────────────────────────────────────────────────────────
-  const resetWrap = createDiv(''); resetWrap.parent(panel);
-  resetWrap.style('padding', '14px');
-  const btnDefaults = createButton('Restore Defaults'); styleBtn(btnDefaults);
-  btnDefaults.style('width', '100%'); btnDefaults.style('color', '#888');
-  btnDefaults.parent(resetWrap);
-  btnDefaults.mousePressed(() => { localStorage.removeItem(SETTINGS_KEY); location.reload(); });
 }
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
@@ -549,57 +564,11 @@ function addToggleRow(labelText, btn, parentDiv) {
   btn.style('min-width', '40px');
 }
 
-function styleBtn(btn) {
-  btn.style('background', '#111');
-  btn.style('color', '#fff');
-  btn.style('border', '1px solid #444');
-  btn.style('padding', '6px 12px');
-  btn.style('font-family', 'monospace');
-  btn.style('font-size', '12px');
-  btn.style('cursor', 'pointer');
-}
-
-function styleModeBtn(btn) {
-  btn.style('background', '#111');
-  btn.style('color', '#555');
-  btn.style('border', '1px solid #2a2a2a');
-  btn.style('padding', '5px 10px');
-  btn.style('font-family', 'monospace');
-  btn.style('font-size', '11px');
-  btn.style('cursor', 'pointer');
-  btn.style('width', '100%');
-  btn.style('text-align', 'left');
-  btn.style('display', 'block');
-  btn.style('margin-bottom', '3px');
-}
-
-function styleNumberInput(inp) {
-  inp.style('background', '#111');
-  inp.style('color', '#fff');
-  inp.style('border', '1px solid #444');
-  inp.style('padding', '6px 8px');
-  inp.style('font-family', 'monospace');
-  inp.style('font-size', '12px');
-}
-
-function styleTextInput(inp) {
-  inp.style('background', '#111');
-  inp.style('color', '#fff');
-  inp.style('border', '1px solid #444');
-  inp.style('padding', '6px 8px');
-  inp.style('font-family', 'monospace');
-  inp.style('font-size', '12px');
-}
-
-function styleSelect(sel) {
-  sel.style('background', '#111');
-  sel.style('color', '#fff');
-  sel.style('border', '1px solid #444');
-  sel.style('padding', '6px 8px');
-  sel.style('font-family', 'monospace');
-  sel.style('font-size', '12px');
-  sel.style('cursor', 'pointer');
-}
+function styleBtn(btn)         { btn.addClass('panel-btn'); }
+function styleModeBtn(btn)     { btn.addClass('panel-mode-btn'); }
+function styleNumberInput(inp) { inp.addClass('panel-input'); }
+function styleTextInput(inp)   { inp.addClass('panel-input'); }
+function styleSelect(sel)      { sel.addClass('panel-select'); }
 
 function updateModeButtons() {
   [[btnModeH, 'harmonic'], [btnModeP, 'pendulum'], [btnModeF, 'factors']].forEach(([btn, m]) => {
@@ -666,8 +635,8 @@ function checkTrigger(ball) {
     if (CONFIG.STROBE_ENABLED) ball.strobeFlipped = !ball.strobeFlipped;
     if (CONFIG.SONAR_ENABLED) {
       sonarRings.push({
-        x: CONFIG.NATIVE_W / 2,
-        y: CONFIG.NATIVE_H / 2 - ball.radius,
+        x: NCX,
+        y: NCY - ball.radius,
         r: CONFIG.BALL_SIZE_PX / 2,
         age: 0,
         hsl: getBallDisplayColor(ball, false),
@@ -682,10 +651,8 @@ function ballTrailMax(ball) {
 }
 
 function pushTrail(ball) {
-  const CX = CONFIG.NATIVE_W / 2;
-  const CY = CONFIG.NATIVE_H / 2;
-  const x = CX + ball.radius * Math.sin(ball.theta);
-  const y = CY - ball.radius * Math.cos(ball.theta);
+  const x = NCX + ball.radius * Math.sin(ball.theta);
+  const y = NCY - ball.radius * Math.cos(ball.theta);
   // Tangential velocity in native px/frame — used when TRAIL_FLING is enabled
   const dTheta = ball.omega / CONFIG.FPS;
   const vx = ball.radius * Math.cos(ball.theta) * dTheta;
@@ -705,73 +672,26 @@ function advanceTrails(ball) {
 
 // ─── Color / display helpers ─────────────────────────────────────────────────
 
-function getBallDisplayColor(ball, triggerOverlays = true) {
-  const mode = CONFIG.COLOR_MODE;
-  const t = ball.index / Math.max(1, balls.length - 1); // 0=innermost, 1=outermost
-  let hsl;
+// ─── Color mode dispatch table ────────────────────────────────────────────────
+// Each entry: (ball, t, frame) → [h, s, l]  (t = normalized index 0–1)
+// Adding a new mode requires only a new key here — no changes to dispatch logic.
+const COLOR_MODES = {
+  index:    (ball, t)        => [ball.hue, 90, 80],
+  inverse:  (ball, t)        => [240 - ball.hue, 90, 80],                 // blue inner → red outer
+  cycle:    (ball, t)        => [(ball.hue * 4) % 360, 90, 80],           // 4 full cycles across set
+  candy:    (ball, t)        => [360 * t, 85, 85],                        // full 360° rainbow, bright pastels
+  phase:    (ball, t)        => [(ball.theta / TWO_PI * 360 + 360) % 360, 90, 80], // hue = orbital angle
+  sunset:   (ball, t)        => { const h = (60 - t * 120 + 360) % 360; return [h, 90, 90 - 50 * t]; },          // yellow→orange→red→purple
+  zebra:    (ball, t)        => { const h = (ball.hue + (ball.index % 2) * 180) % 360; return [h, 90, 80]; },    // adjacent balls complementary
+  plasma:   (ball, t)        => { const h = 300 - t * 120; const s = Math.pow(Math.abs(t * 2 - 1), 0.6) * 85; const l = 50 + (1 - Math.abs(t * 2 - 1)) * 45; return [h, s, l]; }, // magenta→white→cyan
+  galaxy:   (ball, t)        => { const h = 225 * Math.pow(1 - t, 1.2); const s = 20 + 80 * t; const l = 90 - 50 * t; return [h, s, l]; }, // blue-white inner → amber-red outer
+  aurora:   (ball, t, frame) => { const h = 160 + 40 * Math.sin(frame * 0.008 + t * Math.PI * 3); const s = 75 + 20 * Math.sin(frame * 0.011 + t * Math.PI * 2); const l = 65 + 15 * Math.cos(frame * 0.006 + t * Math.PI * 4); return [h, s, l]; }, // slow teal/green/blue sine wave
+  harmonic: (ball, t)        => { const ratio = ball.period / balls[0].period; const nearInt = Math.round(ratio); return Math.abs(ratio - nearInt) < 0.05 ? [(nearInt * 137.508) % 360, 85, 72] : [0, 0, 35]; }, // golden-angle hue for near-integer ratios
+};
 
-  switch (mode) {
-    case 'inverse':
-      hsl = [240 - ball.hue, 90, 80]; // blue inner → red outer
-      break;
-    case 'cycle':
-      hsl = [(ball.hue * 4) % 360, 90, 80]; // 4 full red→blue cycles across the set
-      break;
-    case 'sunset': {
-      // yellow-white (inner) → orange → red → deep purple (outer)
-      const hue = (60 - t * 120 + 360) % 360;
-      hsl = [hue, 90, 90 - 50 * t];
-      break;
-    }
-    case 'candy':
-      hsl = [360 * t, 85, 85]; // full 360° rainbow, bright pastels
-      break;
-    case 'plasma': {
-      // magenta (inner) → white (mid) → cyan (outer)
-      const hue = 300 - t * 120;
-      const sat = Math.pow(Math.abs(t * 2 - 1), 0.6) * 85;
-      const lit = 50 + (1 - Math.abs(t * 2 - 1)) * 45;
-      hsl = [hue, sat, lit];
-      break;
-    }
-    case 'zebra': {
-      // adjacent balls are complementary — dense alternating texture
-      const hue = (ball.hue + (ball.index % 2) * 180) % 360;
-      hsl = [hue, 90, 80];
-      break;
-    }
-    case 'galaxy': {
-      // blue-white (hot inner stars) → amber-red (cool outer giants)
-      const hue = 225 * Math.pow(1 - t, 1.2);
-      const sat = 20 + 80 * t;
-      const lit = 90 - 50 * t;
-      hsl = [hue, sat, lit];
-      break;
-    }
-    case 'phase': {
-      // hue = current orbital angle — animates as balls orbit
-      hsl = [(ball.theta / TWO_PI * 360 + 360) % 360, 90, 80];
-      break;
-    }
-    case 'aurora': {
-      // slow sine wave of teal/green/blue hues drifting across the index axis
-      const hue = 160 + 40 * Math.sin(state.simFrame * 0.008 + t * Math.PI * 3);
-      const sat = 75 + 20 * Math.sin(state.simFrame * 0.011 + t * Math.PI * 2);
-      const lit = 65 + 15 * Math.cos(state.simFrame * 0.006 + t * Math.PI * 4);
-      hsl = [hue, sat, lit];
-      break;
-    }
-    case 'harmonic': {
-      const ratio = ball.period / balls[0].period;
-      const nearInt = Math.round(ratio);
-      hsl = Math.abs(ratio - nearInt) < 0.05
-        ? [(nearInt * 137.508) % 360, 85, 72]
-        : [0, 0, 35];
-      break;
-    }
-    default: // 'index'
-      hsl = [ball.hue, 90, 80];
-  }
+function getBallDisplayColor(ball, triggerOverlays = true) {
+  const t = ball.index / Math.max(1, balls.length - 1); // 0=innermost, 1=outermost
+  let hsl = (COLOR_MODES[CONFIG.COLOR_MODE] ?? COLOR_MODES.index)(ball, t, state.simFrame);
 
   // Ripple: animated rainbow wave flowing outward from center
   if (CONFIG.RIPPLE_ENABLED) {
@@ -810,8 +730,8 @@ function gravityDisplace(nx, ny) {
 // ─── Rendering ────────────────────────────────────────────────────────────────
 
 function drawTriggerLine(S) {
-  const CX = CONFIG.NATIVE_W / 2 * S;
-  const CY = CONFIG.NATIVE_H / 2 * S;
+  const CX = NCX * S;
+  const CY = NCY * S;
   const alpha = CONFIG.TRIGGER_LINE_ALPHA;
   const lw    = CONFIG.TRIGGER_LINE_WIDTH;
 
@@ -822,8 +742,8 @@ function drawTriggerLine(S) {
 
 function drawOrbits(S) {
   if (CONFIG.AFTERGLOW_ENABLED) return; // orbits would accumulate before balls travel there
-  const CX = CONFIG.NATIVE_W / 2 * S;
-  const CY = CONFIG.NATIVE_H / 2 * S;
+  const CX = NCX * S;
+  const CY = NCY * S;
   noFill();
   for (const ball of balls) {
     const [h] = getBallDisplayColor(ball);
@@ -834,8 +754,8 @@ function drawOrbits(S) {
 }
 
 function drawBalls(S) {
-  const CX = CONFIG.NATIVE_W / 2;
-  const CY = CONFIG.NATIVE_H / 2;
+  const CX = NCX;
+  const CY = NCY;
 
   for (const ball of balls) {
     const { trailPos, radius, theta } = ball;
@@ -871,8 +791,8 @@ function drawBalls(S) {
 
 function drawConstellations(S) {
   if (!CONFIG.CONSTELLATION_ENABLED || balls.length < 2) return;
-  const CX = CONFIG.NATIVE_W / 2;
-  const CY = CONFIG.NATIVE_H / 2;
+  const CX = NCX;
+  const CY = NCY;
   const thresh = CONFIG.CONSTELLATION_PHASE_THRESH;
   noFill();
   for (let i = 0; i < balls.length - 1; i++) {
@@ -932,7 +852,7 @@ function drawHUD(S) {
   fill(0, 0, 100, 0.15);
   textSize(22 * S);
   textAlign(CENTER, CENTER);
-  text('ORBITAL', CONFIG.NATIVE_W / 2 * S, CONFIG.NATIVE_H / 2 * S);
+  text('ORBITAL', NCX * S, NCY * S);
 
   // Recording phase indicator with progress
   if (state.recordPhase) {
@@ -988,14 +908,14 @@ async function togglePlay() {
 }
 
 function resetSim() {
-  state.simFrame = -2;
+  state.simFrame = -PRE_FRAMES;
   state.clearCanvas = true;
   for (const ball of balls) {
-    // Start 2 frames before the big bang so balls approach the trigger visibly
-    ball.theta    = ((-2 * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+    // Start PRE_FRAMES before t=0 so balls approach the trigger visibly
+    ball.theta    = ((-PRE_FRAMES * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
     ball.prevTheta = ball.theta;
     ball.trailPos = [];
-    ball.lastTriggerFrame = -9999;
+    ball.lastTriggerFrame = NEVER_TRIGGERED;
     ball.strobeFlipped = false;
   }
 }
@@ -1214,11 +1134,60 @@ async function startRecording() {
   btnRecord.html('Export');
 }
 
+// Renders one silent loop to warm up the afterglow canvas, then resets sim state
+// to the recording start position (canvas left intact so afterglow carries over).
+async function warmupAfterglowCycle(totalFrames) {
+  for (let f = 0; f < totalFrames; f++) {
+    if (!state.recordPhase) return;
+    redraw();
+    if (f % YIELD_INTERVAL === 0) {
+      lblRecordStatus.html(`VIDEO — warming up ${Math.round(f / totalFrames * 100)}%`);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+  if (!state.recordPhase) return;
+  // Reset sim state back to recording start, but leave canvas so afterglow carries in.
+  state.simFrame = -PRE_FRAMES;
+  sonarRings = [];
+  for (const ball of balls) {
+    ball.theta         = ((-PRE_FRAMES * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
+    ball.prevTheta     = ball.theta;
+    ball.trailPos      = [];
+    ball.lastTriggerFrame = NEVER_TRIGGERED;
+    ball.strobeFlipped = false;
+  }
+}
+
+// Flushes the encoder, finalizes the muxer, and triggers a download of the MP4.
+async function flushAndDownloadVideo(encoder, muxer, target, encoderError) {
+  updateRecordProgress('VIDEO', 1);
+  noLoop(); // suppress p5 draw loop during CPU-intensive flush
+  try {
+    const initialQueue = encoder.encodeQueueSize;
+    const flushPromise = encoder.flush();
+    if (initialQueue > 0) {
+      while (encoder.encodeQueueSize > 0) {
+        if (encoderError()) throw encoderError();
+        const frac = 1 - encoder.encodeQueueSize / initialQueue;
+        lblRecordStatus.html(`VIDEO — encoding ${Math.round(frac * 100)}%`);
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    await flushPromise;
+  } finally {
+    loop();
+  }
+  encoder.close();
+  muxer.finalize();
+  downloadBlob(new Blob([target.buffer], { type: 'video/mp4' }), 'orbital_video.mp4');
+}
+
 async function doVideoPass() {
   resetSim();
   state.playing = true;
   state.recordPhase = 'video';
   const totalFrames = Math.ceil(CONFIG.ORBIT_LOOP * CONFIG.FPS);
+  state.recordTotalFrames = totalFrames;
   Tone.Destination.volume.value = -Infinity;
 
   if (typeof VideoEncoder === 'undefined') throw new Error('VideoEncoder not available — use Chrome 94+ or Edge 94+');
@@ -1246,10 +1215,10 @@ async function doVideoPass() {
     fastStart: 'in-memory',
   });
 
-  let encoderError = null;
+  let _encoderError = null;
   const encoder = new VideoEncoder({
     output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
-    error: e => { encoderError = e; },
+    error: e => { _encoderError = e; },
   });
   encoder.configure({
     codec: 'avc1.640032',   // H.264 High profile, Level 5.0 — handles 1080×1920@60
@@ -1261,46 +1230,22 @@ async function doVideoPass() {
 
   noLoop();
   try {
-    // Afterglow warm-up: render one silent cycle to pre-build the persistent canvas
-    // state so the recorded loop starts and ends with matching afterglow.
-    if (CONFIG.AFTERGLOW_ENABLED) {
-      for (let f = 0; f < totalFrames; f++) {
-        if (!state.recordPhase) break;
-        redraw();
-        if (f % 30 === 0) {
-          lblRecordStatus.html(`VIDEO — warming up ${Math.round(f / totalFrames * 100)}%`);
-          await new Promise(r => setTimeout(r, 0));
-        }
-      }
-      if (state.recordPhase) {
-        // Reset sim state back to the recording start position, but leave the
-        // canvas untouched so the built-up afterglow carries into the recording.
-        state.simFrame = -2;
-        sonarRings = [];
-        for (const ball of balls) {
-          ball.theta         = ((-2 * ball.omega / CONFIG.FPS) % TWO_PI + TWO_PI) % TWO_PI;
-          ball.prevTheta     = ball.theta;
-          ball.trailPos      = [];
-          ball.lastTriggerFrame = -9999;
-          ball.strobeFlipped = false;
-        }
-      }
-    }
+    if (CONFIG.AFTERGLOW_ENABLED) await warmupAfterglowCycle(totalFrames);
 
     for (let f = 0; f < totalFrames; f++) {
       if (!state.recordPhase) break;
-      if (encoderError) throw encoderError;
+      if (_encoderError) throw _encoderError;
       // Backpressure: let encoder drain before submitting more frames
       while (encoder.encodeQueueSize > 10) {
         await new Promise(r => setTimeout(r, 16));
-        if (encoderError) throw encoderError;
+        if (_encoderError) throw _encoderError;
       }
       redraw();
       readbackCtx.drawImage(canvas, 0, 0); // force GPU→CPU copy
       const frame = new VideoFrame(readback, { timestamp: Math.round(f * 1_000_000 / CONFIG.FPS) });
       encoder.encode(frame, { keyFrame: f % 60 === 0 });
       frame.close();
-      if (f % 30 === 0) {
+      if (f % YIELD_INTERVAL === 0) {
         updateRecordProgress('VIDEO', f / totalFrames);
         await new Promise(r => setTimeout(r, 0));
       }
@@ -1315,26 +1260,7 @@ async function doVideoPass() {
 
   if (!state.recordPhase) { encoder.close(); return; }
 
-  updateRecordProgress('VIDEO', 1);
-  noLoop(); // suppress p5 draw loop during CPU-intensive flush
-  try {
-    const initialQueue = encoder.encodeQueueSize;
-    const flushPromise = encoder.flush();
-    if (initialQueue > 0) {
-      while (encoder.encodeQueueSize > 0) {
-        if (encoderError) throw encoderError;
-        const frac = 1 - encoder.encodeQueueSize / initialQueue;
-        lblRecordStatus.html(`VIDEO — encoding ${Math.round(frac * 100)}%`);
-        await new Promise(r => setTimeout(r, 100));
-      }
-    }
-    await flushPromise;
-  } finally {
-    loop();
-  }
-  encoder.close();
-  muxer.finalize();
-  downloadBlob(new Blob([target.buffer], { type: 'video/mp4' }), 'orbital_video.mp4');
+  await flushAndDownloadVideo(encoder, muxer, target, () => _encoderError);
 }
 
 async function doAudioPass() {
@@ -1403,7 +1329,6 @@ function audioBufferToWav(buffer, trimSecs) {
 }
 
 function cancelRecording() {
-  const wasPhase = state.recordPhase;
   state.recordPhase = null;
   state.playing = false;
   Tone.Destination.volume.value = 0;

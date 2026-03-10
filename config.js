@@ -12,7 +12,7 @@
 const PRESETS = {
   harmonic_24:  { label: 'Harmonic 24',  mode: 'harmonic', balls: 24,  loop: 24  },
   harmonic_32:  { label: 'Harmonic 32',  mode: 'harmonic', balls: 32,  loop: 32  },
-  harmonic_48:  { label: 'Harmonic 48',  mode: 'harmonic', balls: 48,  loop: 120 },
+  harmonic_48:  { label: 'Harmonic 48 (120s)', mode: 'harmonic', balls: 48, loop: 120 },
   harmonic_60:  { label: 'Harmonic 60',  mode: 'harmonic', balls: 60,  loop: 60  },
   harmonic_120: { label: 'Harmonic 120', mode: 'harmonic', balls: 120, loop: 120 },
   pendulum_51:  { label: 'Pendulum 51',  mode: 'pendulum', balls: 51,  loop: 60  },
@@ -74,7 +74,7 @@ const SYNTH_PRESETS = {
 
   warm_organ: {
     label: 'Warm Organ',
-    noteDuration: '4n',
+    noteDuration: '4n',   // quarter note — sustained square wave needs longer gate than pluck synths
     // Square wave + chorus + sustain — warm, full-bodied, church-like
     build() {
       const poly = new Tone.PolySynth(Tone.Synth, {
@@ -137,7 +137,7 @@ const SYNTH_PRESETS = {
 
   gameboy: {
     label: 'Game Boy',
-    noteDuration: '16n',
+    noteDuration: '16n',  // sixteenth note — short punchy gate matches DMG lo-fi crunch aesthetic
     // Square wave through a WaveShaper that quantizes to 4-bit steps — lo-fi DMG crunch.
     // Uses WaveShaper instead of BitCrusher because BitCrusher requires an AudioWorklet
     // which fails under file:// (blob:null/ URLs are blocked).
@@ -156,7 +156,7 @@ const SYNTH_PRESETS = {
 
   cosmic_pad: {
     label: 'Cosmic Pad',
-    noteDuration: '2n',
+    noteDuration: '2n',   // half note — long gate lets sine attack/sustain envelope bloom fully
     // Sine + ping-pong delay + long reverb — spacey, drifting, immersive
     build() {
       const poly = new Tone.PolySynth(Tone.Synth, {
